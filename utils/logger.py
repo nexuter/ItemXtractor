@@ -36,15 +36,8 @@ class ExtractionLogger:
         console_handler.setFormatter(formatter)
         self.logger.addHandler(console_handler)
         
-        # File handler (unique for each run)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = os.path.join(log_dir, f"extraction_{timestamp}.log")
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(formatter)
-        self.logger.addHandler(file_handler)
-        
         # CSV extraction log for concise tracking
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.csv_log_file = os.path.join(log_dir, f"extraction_{timestamp}.csv")
         self.csv_log_written_header = False
         
