@@ -137,3 +137,30 @@ class FileManager:
         """
         with open(file_path, 'r', encoding='utf-8') as f:
             return json.load(f)
+    
+    def load_json(self, file_path: str) -> Dict[str, Any]:
+        """
+        Load JSON data from file
+        
+        Args:
+            file_path: Path to the JSON file
+            
+        Returns:
+            Dictionary containing JSON data
+        """
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    
+    def save_json(self, file_path: str, data: Dict[str, Any]) -> None:
+        """
+        Save data to JSON file
+        
+        Args:
+            file_path: Path to save the JSON file
+            data: Dictionary containing data to save
+        """
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)

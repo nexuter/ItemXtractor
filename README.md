@@ -13,6 +13,7 @@ A professional Python tool for extracting specific items from SEC EDGAR 10-K and
 - 🔍 **CIK or Ticker**: Works with both CIK numbers and stock ticker symbols
 - ✓ **Amendment Filtering**: Automatically skips amended filings (10-K/A, 10-Q/A), selecting regular filings
 - 🛡️ **Robust Boundary Detection**: Handles edge cases with ID-based markers and HTML parsing variations
+- 📚 **Hierarchical Structure Extraction**: Automatically detects and extracts nested heading-body pairs from items with multi-level hierarchies
 
 ## Installation
 
@@ -107,17 +108,77 @@ sec_filings/
                 └── ...
 ```
 
-### JSON Output Format
+### Structure Extraction
 
-Each extracted item is saved as a JSON file with the following structure:
+After extracting items, you can extract hierarchical heading-body pair structures from within each item. This is useful for further analysis of complex items like Item 1 (Business).
+
+Extract hierarchical structures from already extracted items:
+```bash
+python main.py --ticker AAPL --filing 10-K --year 2022 --extract-structure
+```
+
+This creates `*_xtr.json` files alongside the original item files, containing the hierarchical structure:
 
 ```json
 {
-  "item_number": "1A",
-  "item_title": "Item 1A. Risk Factors",
-  "html_content": "<div>...</div>",
-  "text_content": "Risk Factors\n\nOur business, reputation..."
+  "ticker": "AAPL",
+  "year": "2022",
+  "filing_type": "10-K",
+  "item_number": "1",
+  "structure": [
+    {
+      "type": "bold_heading",
+      "layer": 1,
+      "heading": "Products",
+      "body": "",
+      "children": [
+        {
+          "type": "heading",
+          "layer": 2,
+          "heading": "iPhone",
+          "body": "iPhone® is the Company's line of smartphones...",
+          "children": []
+        },
+        {
+          "type": "heading",
+          "layer": 2,
+          "heading": "Mac",
+          "body": "Mac® is the Company's line of personal computers...",
+          "children": []
+        }
+      ]
+    }
+  ]
 }
+```
+
+**How it works:**
+- Level 1 headings are bold styled divs (font-weight:700)
+- Level 2 headings are italic styled divs (font-style:italic) nested under level 1
+- Each heading captures the body content until the next heading at same or higher level
+- Supports arbitrary nesting depth for complex documents
+
+**Example - AAPL 2022 Item 1 structure:**
+- Item 1. Business (level 1)
+  - Company Background (level 1)
+  - Products (level 1)
+    - iPhone (level 2)
+    - Mac (level 2)
+    - iPad (level 2)
+    - Wearables, Home and Accessories (level 2)
+  - Services (level 1)
+    - Advertising (level 2)
+    - AppleCare (level 2)
+    - Cloud Services (level 2)
+    - Digital Content (level 2)
+    - Payment Services (level 2)
+  - Human Capital (level 1)
+    - Workplace Practices and Policies (level 2)
+    - Compensation and Benefits (level 2)
+    - Inclusion and Diversity (level 2)
+    - Engagement (level 2)
+    - Health and Safety (level 2)
+
 ```
 
 ## Available Items

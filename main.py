@@ -7,10 +7,13 @@ using the Table of Contents to locate each item within the filing.
 
 import os
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Union
 from src.downloader import SECDownloader
 from src.parser import SECParser
 from src.extractor import ItemExtractor
+from src.structure_extractor import StructureExtractor
 from utils.logger import ExtractionLogger
 from utils.file_manager import FileManager
 from config import ITEMS_10K, ITEMS_10Q
@@ -30,8 +33,10 @@ class ItemXtractor:
         self.downloader = SECDownloader()
         self.parser = SECParser()
         self.extractor = ItemExtractor()
+        self.structure_extractor = StructureExtractor()
         self.file_manager = FileManager(base_dir)
         self.logger = ExtractionLogger(log_dir)
+        self.logger_lock = threading.Lock()  # For thread-safe logging
     
     def _get_available_items(self, filing_type: str) -> List[str]:
         """
@@ -49,6 +54,47 @@ class ItemXtractor:
             return list(ITEMS_10Q.keys())
         else:
             return []
+    def _extract_and_save_item(self, item_number: str, html_content: str, 
+                               toc_items: dict, cik_ticker: str, year: str,
+                               filing_type: str, filing_record: dict) -> tuple:
+        """
+        Extract and save a single item (worker method for parallel processing)
+        
+        Args:
+            item_number: Item number to extract
+            html_content: HTML content of the filing
+            toc_items: TOC items dictionary
+            cik_ticker: CIK or ticker symbol
+            year: Filing year
+            filing_type: Type of filing (10-K or 10-Q)
+            filing_record: Filing record for logging
+            
+        Returns:
+            Tuple of (item_number, success, error_message)
+        """
+        try:
+            item_data = self.extractor.extract_item(
+                html_content, item_number, toc_items
+            )
+            
+            # Save to JSON
+            item_path = self.file_manager.get_item_path(
+                cik_ticker, year, filing_type, item_number
+            )
+            self.file_manager.save_item_json(item_path, item_data)
+            
+            # Thread-safe logging
+            with self.logger_lock:
+                self.logger.log_item_extraction(filing_record, item_number, True)
+            
+            return (item_number, True, None)
+        except Exception as e:
+            # Thread-safe logging
+            with self.logger_lock:
+                self.logger.log_item_extraction(
+                    filing_record, item_number, False, error=str(e)
+                )
+            return (item_number, False, str(e))
     
     def process_filing(self, cik_ticker: str, year: str, filing_type: str,
                       items: Optional[List[str]] = None) -> bool:
@@ -66,6 +112,9 @@ class ItemXtractor:
         """
         # Start logging for this filing
         filing_record = self.logger.log_filing_start(cik_ticker, year, filing_type)
+        self.logger.info(
+            f"Filing worker: {threading.current_thread().name} | {cik_ticker} {filing_type} {year}"
+        )
         
         try:
             # Create directory structure upfront
@@ -132,25 +181,12 @@ class ItemXtractor:
                 # Only extract requested items that exist in TOC
                 items_to_extract = [item for item in items if item in toc_items]
             
-            # Extract items
+            # Extract items sequentially for a single filing
             for item_number in items_to_extract:
-                try:
-                    item_data = self.extractor.extract_item(
-                        html_content, item_number, toc_items
-                    )
-                    
-                    # Save to JSON
-                    item_path = self.file_manager.get_item_path(
-                        cik_ticker, year, filing_type, item_number
-                    )
-                    self.file_manager.save_item_json(item_path, item_data)
-                    
-                    self.logger.log_item_extraction(filing_record, item_number, True)
-                    
-                except Exception as e:
-                    self.logger.log_item_extraction(
-                        filing_record, item_number, False, error=str(e)
-                    )
+                self._extract_and_save_item(
+                    item_number, html_content, toc_items,
+                    cik_ticker, year, filing_type, filing_record
+                )
             
             self.logger.log_filing_complete(filing_record)
             return True
@@ -161,10 +197,158 @@ class ItemXtractor:
             self.logger.log_filing_complete(filing_record)
             return False
     
+    def _extract_item_structure(self, cik_ticker: str, year: str, filing_type: str,
+                                item_number: str) -> bool:
+        """
+        Extract hierarchical structure from an item
+        
+        Args:
+            cik_ticker: CIK or ticker symbol
+            year: Filing year
+            filing_type: Type of filing
+            item_number: Item number
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Load item JSON
+            item_path = self.file_manager.get_item_path(
+                cik_ticker, year, filing_type, item_number
+            )
+            
+            if not self.file_manager.file_exists(item_path):
+                with self.logger_lock:
+                    self.logger.warning(
+                        f"Item file not found for structure extraction: {item_path}"
+                    )
+                return False
+            
+            # Load item data
+            item_data = self.file_manager.load_json(item_path)
+            item_html = item_data.get('html_content', '')
+            
+            if not item_html:
+                with self.logger_lock:
+                    self.logger.warning(
+                        f"No HTML content in item {item_number} for {cik_ticker} {filing_type} {year}"
+                    )
+                return False
+            
+            # Extract structure
+            structure = self.structure_extractor.extract_structure(item_html)
+            
+            # Save structure to *_xtr.json
+            xtr_filename = f"{cik_ticker}_{year}_{filing_type}_item{item_number}_xtr.json"
+            xtr_path = os.path.join(
+                os.path.dirname(item_path),
+                xtr_filename
+            )
+            
+            xtr_data = {
+                'ticker': cik_ticker,
+                'year': year,
+                'filing_type': filing_type,
+                'item_number': item_number,
+                'structure': structure
+            }
+            
+            self.file_manager.save_json(xtr_path, xtr_data)
+            
+            with self.logger_lock:
+                self.logger.info(
+                    f"Extracted structure for Item {item_number} from {cik_ticker} {filing_type} {year} "
+                    f"({len(structure)} elements)"
+                )
+            
+            return True
+            
+        except Exception as e:
+            with self.logger_lock:
+                self.logger.error(
+                    f"Failed to extract structure for Item {item_number}: {str(e)}"
+                )
+            return False
+    
+    def extract_structures(self, cik_tickers: Union[str, List[str]],
+                          filing_types: Union[str, List[str]],
+                          years: Union[str, int, List[Union[str, int]]],
+                          items: Optional[List[str]] = None,
+                          max_workers: int = 4) -> str:
+        """
+        Extract hierarchical structure from already extracted items
+        
+        Args:
+            cik_tickers: CIK number(s) or ticker symbol(s)
+            filing_types: Filing type(s) (10-K, 10-Q)
+            years: Year(s) to extract
+            items: List of item numbers to extract structures (None = all available)
+            max_workers: Number of worker threads for parallel extraction
+            
+        Returns:
+            Summary message
+        """
+        # Normalize inputs
+        if isinstance(cik_tickers, str):
+            cik_tickers = [cik_tickers]
+        if isinstance(filing_types, str):
+            filing_types = [filing_types]
+        if isinstance(years, (str, int)):
+            years = [str(years)]
+        else:
+            years = [str(year) for year in years]
+        
+        self.logger.info("Starting structure extraction...")
+        
+        # Build tasks
+        tasks = []
+        for cik_ticker in cik_tickers:
+            for filing_type in filing_types:
+                for year in years:
+                    # Get items to process
+                    if items is None:
+                        available_items = self._get_available_items(filing_type)
+                    else:
+                        available_items = items
+                    
+                    for item_number in available_items:
+                        tasks.append((cik_ticker, year, filing_type, item_number))
+        
+        # Process in parallel
+        successful = 0
+        failed = 0
+        
+        if len(tasks) > 1 and max_workers > 1:
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="structure-worker") as executor:
+                futures = []
+                for cik_ticker, year, filing_type, item_number in tasks:
+                    future = executor.submit(
+                        self._extract_item_structure,
+                        cik_ticker, year, filing_type, item_number
+                    )
+                    futures.append(future)
+                
+                for future in futures:
+                    if future.result():
+                        successful += 1
+                    else:
+                        failed += 1
+        else:
+            for cik_ticker, year, filing_type, item_number in tasks:
+                if self._extract_item_structure(cik_ticker, year, filing_type, item_number):
+                    successful += 1
+                else:
+                    failed += 1
+        
+        summary = f"Structure extraction complete: {successful} successful, {failed} failed"
+        self.logger.info(summary)
+        return summary
+    
     def extract(self, cik_tickers: Union[str, List[str]], 
                 filing_types: Union[str, List[str]],
                 years: Union[str, int, List[Union[str, int]]],
-                items: Optional[List[str]] = None) -> str:
+                items: Optional[List[str]] = None,
+                max_workers: int = 4) -> str:
         """
         Extract items from SEC filings
         
@@ -173,6 +357,7 @@ class ItemXtractor:
             filing_types: Filing type(s) (10-K, 10-Q)
             years: Year(s) to extract
             items: List of item numbers to extract (None = extract all)
+            max_workers: Number of worker threads for parallel extraction
             
         Returns:
             JSON report string
@@ -192,14 +377,33 @@ class ItemXtractor:
             cik_tickers=cik_tickers,
             filing_types=filing_types,
             years=years,
-            items=items if items else "all"
+            items=items if items else "all",
+            workers=max_workers
         )
         
-        # Process each combination
+        # Build filing tasks
+        tasks = []
         for cik_ticker in cik_tickers:
             for filing_type in filing_types:
                 for year in years:
-                    self.process_filing(cik_ticker, year, filing_type, items)
+                    tasks.append((cik_ticker, year, filing_type))
+        
+        # Parallelize across filings only when multiple filings are requested
+        if len(tasks) > 1 and max_workers > 1:
+            with ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix="filing-worker"
+            ) as executor:
+                futures = []
+                for cik_ticker, year, filing_type in tasks:
+                    futures.append(
+                        executor.submit(self.process_filing, cik_ticker, year, filing_type, items)
+                    )
+                for future in futures:
+                    future.result()
+        else:
+            for cik_ticker, year, filing_type in tasks:
+                self.process_filing(cik_ticker, year, filing_type, items)
         
         # Generate and return report
         return self.logger.generate_report()
@@ -225,6 +429,9 @@ Examples:
   
   # Use CIK instead of ticker
   python main.py --cik 0000320193 --filing 10-K --year 2023
+  
+  # Extract hierarchical structure from already extracted items
+  python main.py --ticker AAPL --filing 10-K --year 2023 --extract-structure
         """
     )
     
@@ -250,6 +457,14 @@ Examples:
     parser.add_argument('--log-dir', default='logs',
                        help='Log directory (default: logs)')
     
+    # Performance
+    parser.add_argument('--workers', type=int, default=4,
+                       help='Number of worker threads for parallel extraction (default: 4)')
+    
+    # Structure extraction
+    parser.add_argument('--extract-structure', action='store_true',
+                       help='Extract hierarchical structure (heading-body pairs) from items')
+    
     args = parser.parse_args()
     
     # Convert years to integers
@@ -266,13 +481,25 @@ Examples:
     # Create extractor
     extractor = ItemXtractor(base_dir=args.output_dir, log_dir=args.log_dir)
     
-    # Run extraction
-    extractor.extract(
-        cik_tickers=companies,
-        filing_types=args.filings,
-        years=years,
-        items=args.items
-    )
+    # Run extraction or structure extraction
+    if args.extract_structure:
+        # Extract structure from already extracted items
+        extractor.extract_structures(
+            cik_tickers=companies,
+            filing_types=args.filings,
+            years=years,
+            items=args.items,
+            max_workers=args.workers
+        )
+    else:
+        # Run normal item extraction
+        extractor.extract(
+            cik_tickers=companies,
+            filing_types=args.filings,
+            years=years,
+            items=args.items,
+            max_workers=args.workers
+        )
 
 
 if __name__ == "__main__":
