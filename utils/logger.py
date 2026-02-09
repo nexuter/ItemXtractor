@@ -4,11 +4,12 @@ Logger for tracking extraction operations
 
 import logging
 import json
+import csv
 import os
 import threading
 from datetime import datetime
 from typing import Dict, Any, List
-from config import LOGS_DIR, LOG_FORMAT, LOG_DATE_FORMAT
+from config import LOGS_DIR, LOG_FORMAT, LOG_DATE_FORMAT, ITEMS_10K, ITEMS_10Q
 
 
 class ExtractionLogger:
@@ -184,10 +185,10 @@ class ExtractionLogger:
     
     def generate_report(self) -> str:
         """
-        Generate final execution report
+        Generate final execution report in CSV format
         
         Returns:
-            JSON report string
+            CSV report string
         """
         with self.lock:
             self.session_data['end_time'] = datetime.now().isoformat()
@@ -204,18 +205,68 @@ class ExtractionLogger:
             toc_found = sum(1 for f in self.session_data['filings'] if f['toc_found'])
             total_items = sum(len(f['items_extracted']) for f in self.session_data['filings'])
             
-            self.session_data['summary'] = {
-                'total_filings': total_filings,
-                'successful_downloads': successful_downloads,
-                'toc_found': toc_found,
-                'total_items_extracted': total_items
-            }
-            
-            # Save report to file
+            # Save report to CSV file
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            report_file = os.path.join(self.log_dir, f"report_{timestamp}.json")
-            with open(report_file, 'w', encoding='utf-8') as f:
-                json.dump(self.session_data, f, indent=2, ensure_ascii=False)
+            report_file = os.path.join(self.log_dir, f"report_{timestamp}.csv")
+            
+            # Get all item columns (10-K items followed by 10-Q items)
+            all_10k_items = list(ITEMS_10K.keys())
+            all_10q_items = list(ITEMS_10Q.keys())
+            
+            with open(report_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                
+                # Line 1: Start time
+                writer.writerow([f"Start Time: {start.strftime('%Y-%m-%d %H:%M:%S')}"])
+                
+                # Line 2: Column headers
+                headers = ['Ticker', 'Year', 'Filing Type']
+                headers.extend([f'10-K Item {item}' for item in all_10k_items])
+                headers.extend([f'10-Q Item {item}' for item in all_10q_items])
+                headers.append('Runtime (sec)')
+                writer.writerow(headers)
+                
+                # Data rows: One row per filing
+                for filing in self.session_data['filings']:
+                    row = [
+                        filing['cik_ticker'],
+                        filing['year'],
+                        filing['filing_type']
+                    ]
+                    
+                    # Add O/X for each 10-K item
+                    filing_items = set(filing['items_extracted'])
+                    for item in all_10k_items:
+                        if filing['filing_type'] == '10-K':
+                            row.append('O' if item in filing_items else 'X')
+                        else:
+                            row.append('')  # Empty for 10-Q filings
+                    
+                    # Add O/X for each 10-Q item
+                    for item in all_10q_items:
+                        if filing['filing_type'] == '10-Q':
+                            row.append('O' if item in filing_items else 'X')
+                        else:
+                            row.append('')  # Empty for 10-K filings
+                    
+                    # Add runtime
+                    runtime = filing.get('duration_seconds', 0)
+                    row.append(f'{runtime:.2f}')
+                    
+                    writer.writerow(row)
+                
+                # Empty line before summary
+                writer.writerow([])
+                
+                # Summary section
+                writer.writerow([f"End Time: {end.strftime('%Y-%m-%d %H:%M:%S')}"])
+                writer.writerow([f"Total Runtime (sec): {total_duration:.2f}"])
+                writer.writerow([])
+                writer.writerow(['Summary'])
+                writer.writerow(['Total Filings', total_filings])
+                writer.writerow(['Successful Downloads', successful_downloads])
+                writer.writerow(['TOC Found', toc_found])
+                writer.writerow(['Total Items Extracted', total_items])
             
             self.logger.info(f"Execution Report:")
             self.logger.info(f"  Total Duration: {total_duration:.2f}s")
@@ -225,7 +276,7 @@ class ExtractionLogger:
             self.logger.info(f"  Total Items Extracted: {total_items}")
             self.logger.info(f"  Report saved to: {report_file}")
             
-            return json.dumps(self.session_data, indent=2)
+            return f"Report saved to: {report_file}"
     
     def info(self, message: str) -> None:
         """Log info message"""
