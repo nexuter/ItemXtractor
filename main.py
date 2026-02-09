@@ -14,6 +14,7 @@ from src.downloader import SECDownloader
 from src.parser import SECParser
 from src.extractor import ItemExtractor
 from src.structure_extractor import StructureExtractor
+from src.index_parser import SECIndexParser
 from utils.logger import ExtractionLogger
 from utils.file_manager import FileManager
 from config import ITEMS_10K, ITEMS_10Q
@@ -34,6 +35,7 @@ class ItemXtractor:
         self.parser = SECParser()
         self.extractor = ItemExtractor()
         self.structure_extractor = StructureExtractor()
+        self.index_parser = SECIndexParser()
         self.file_manager = FileManager(base_dir)
         self.logger = ExtractionLogger(log_dir)
         self.logger_lock = threading.Lock()  # For thread-safe logging
@@ -430,17 +432,20 @@ Examples:
   # Use CIK instead of ticker
   python main.py --cik 0000320193 --filing 10-K --year 2023
   
+  # Download ALL companies for specific years (no ticker/CIK specified)
+  python main.py --filing 10-K --years 2023 2024 2025
+  
   # Extract hierarchical structure from already extracted items
   python main.py --ticker AAPL --filing 10-K --year 2023 --extract-structure
         """
     )
     
-    # Company identifiers
-    group = parser.add_mutually_exclusive_group(required=True)
+    # Company identifiers (optional - if not provided, downloads all companies)
+    group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument('--ticker', '--tickers', nargs='+', dest='tickers',
-                      help='Stock ticker symbol(s)')
+                      help='Stock ticker symbol(s) (if omitted, downloads all companies)')
     group.add_argument('--cik', '--ciks', nargs='+', dest='ciks',
-                      help='CIK number(s)')
+                      help='CIK number(s) (if omitted, downloads all companies)')
     
     # Filing parameters
     parser.add_argument('--filing', '--filings', nargs='+', dest='filings',
@@ -472,11 +477,48 @@ Examples:
     
     # Validate years
     for year in years:
-        if year < 1995 or year > 2025:
-            parser.error(f"Year {year} must be between 1995 and 2025")
+        if year < 1995 or year > 2026:
+            parser.error(f"Year {year} must be between 1995 and 2026")
     
     # Get company identifiers
     companies = args.tickers if args.tickers else args.ciks
+    
+    # If no companies specified, download all companies from SEC index
+    if not companies:
+        print("\n" + "="*80)
+        print("WARNING: No tickers or CIKs specified - will download ALL companies!")
+        print("="*80)
+        
+        # Estimate filing count
+        index_parser = SECIndexParser()
+        for filing_type in args.filings:
+            estimated_count, quarters = index_parser.estimate_filing_count(filing_type, years)
+            print(f"\nEstimated {filing_type} filings: ~{estimated_count:,}")
+            print(f"Years: {', '.join(map(str, years))}")
+            print(f"Quarters to check: {quarters}")
+        
+        print("\nThis may take several hours and require significant storage.")
+        print("Rate limiting: 10 requests/second (SEC requirement)")
+        
+        # Confirmation prompt
+        response = input("\nDo you want to continue? (yes/no): ").strip().lower()
+        if response not in ['yes', 'y']:
+            print("Operation cancelled.")
+            sys.exit(0)
+        
+        print("\nFetching company list from SEC EDGAR full-index...")
+        
+        # Get all CIKs for each filing type
+        all_ciks = set()
+        for filing_type in args.filings:
+            print(f"\nScanning {filing_type} filings across {len(years)} year(s)...")
+            ciks = index_parser.get_ciks_for_filing(filing_type, years)
+            all_ciks.update(ciks)
+            print(f"Found {len(ciks)} unique companies filing {filing_type}")
+        
+        companies = sorted(all_ciks)
+        print(f"\nTotal unique companies: {len(companies)}")
+        print("\nStarting extraction...\n")
     
     # Create extractor
     extractor = ItemXtractor(base_dir=args.output_dir, log_dir=args.log_dir)

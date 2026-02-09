@@ -7,6 +7,7 @@ A professional Python tool for extracting specific items from SEC EDGAR 10-K and
 - 🎯 **Smart Extraction**: Uses Table of Contents to accurately locate and extract specific items
 - 📊 **Multiple Filing Types**: Supports both 10-K and 10-Q filings
 - 🔄 **Batch Processing**: Extract from multiple companies, years, and filings in one command
+- 🌐 **Full-Index Download**: Download ALL companies' filings when no ticker/CIK specified (uses SEC quarterly index files)
 - 💾 **Skip Downloads**: Automatically skips re-downloading existing files
 - 📝 **Comprehensive Logging**: Detailed logs and JSON reports for each extraction session
 - 🎨 **Dual Format Output**: Each item saved as both HTML and plain text in JSON
@@ -14,6 +15,7 @@ A professional Python tool for extracting specific items from SEC EDGAR 10-K and
 - ✓ **Amendment Filtering**: Automatically skips amended filings (10-K/A, 10-Q/A), selecting regular filings
 - 🛡️ **Robust Boundary Detection**: Handles edge cases with ID-based markers and HTML parsing variations
 - 📚 **Hierarchical Structure Extraction**: Automatically detects and extracts nested heading-body pairs from items with multi-level hierarchies
+- 🔐 **Safety Prompts**: Confirmation required for large-scale downloads (thousands of filings)
 
 ## Installation
 
@@ -59,6 +61,12 @@ Extract from multiple companies and years:
 ```bash
 python main.py --tickers AAPL MSFT GOOGL --filing 10-K --years 2022 2023
 ```
+
+Download ALL companies for specific years (no ticker/CIK specified):
+```bash
+python main.py --filing 10-K --years 2023 2024 2025
+```
+⚠️ **Warning**: This will download thousands of filings and may take several hours.
 
 ### Python API Usage
 
@@ -218,6 +226,74 @@ This creates `*_xtr.json` files alongside the original item files, containing th
 | 2    | Management's Discussion and Analysis |
 | 3    | Quantitative and Qualitative Disclosures About Market Risk |
 | 4    | Controls and Procedures |
+
+## Full-Index Download (All Companies)
+
+When no `--ticker` or `--cik` is specified, ItemXtractor automatically downloads filings for **ALL companies** from SEC EDGAR using quarterly full-index files.
+
+### How It Works
+
+1. Downloads `company.idx` files from https://www.sec.gov/Archives/edgar/full-index/{year}/QTR{1-4}/
+2. Parses index to extract all companies that filed the specified form type
+3. Removes duplicates and prompts for confirmation
+4. Downloads and extracts items from all discovered filings
+
+### Usage
+
+```bash
+# Download ALL 10-K filings for 2024 (will prompt for confirmation)
+python main.py --filing 10-K --year 2024
+
+# Download ALL companies across multiple years
+python main.py --filing 10-K --years 2023 2024 2025
+
+# Download all companies but extract specific items only
+python main.py --filing 10-K --year 2024 --items 1 1A 7
+```
+
+### Expected Volume & Time
+
+**Typical 10-K volume per year:** ~6,700 companies  
+**Typical 10-Q volume per year:** ~20,000 filings (3 quarters)
+
+**Time estimates for 6,700 10-K filings:**
+- Index download: ~1.6 seconds
+- Filing downloads: ~22 minutes minimum (with SEC rate limiting)
+- Full extraction: 2-3 hours
+
+**Storage:** 3-13 GB per 6,700 filings
+
+### Safety Features
+
+- **Confirmation Prompt**: Shows estimated filing count and requires "yes" to proceed
+- **Progress Reporting**: Displays companies found per filing type
+- **Rate Limiting**: Respects SEC's 10 requests/second limit
+- **Graceful Errors**: Continues processing if individual filings fail
+
+Example confirmation prompt:
+```
+================================================================================
+WARNING: No tickers or CIKs specified - will download ALL companies!
+================================================================================
+
+Estimated 10-K filings: ~6,700
+Years: 2024
+Quarters to check: 4
+
+This may take several hours and require significant storage.
+Rate limiting: 10 requests/second (SEC requirement)
+
+Do you want to continue? (yes/no):
+```
+
+### Best Practices
+
+1. **Test with single year first** before scaling to multiple years
+2. **Use `--items`** to limit extraction scope and reduce processing time
+3. **Monitor disk space** before starting large downloads
+4. **Use high `--workers`** count for parallel processing (e.g., `--workers 16`)
+
+See [FULL_INDEX_FEATURE.md](FULL_INDEX_FEATURE.md) for detailed documentation.
 
 ## Command Line Options
 
