@@ -11,8 +11,17 @@ class SECParser:
     """Parses SEC filings to extract Table of Contents"""
     
     def __init__(self):
-        """Initialize SECParser"""
-        pass
+        """Initialize SECParser with pre-compiled regex patterns"""
+        # OPTIMIZED: Pre-compile patterns for reuse
+        self.end_marker_patterns = [
+            re.compile(r'id\s*=\s*["\']signatures[^"\']*["\']', re.IGNORECASE),
+            re.compile(r'id\s*=\s*["\']exhibits[^"\']*["\']', re.IGNORECASE),
+            re.compile(r'id\s*=\s*["\'][^"\']*cover[^"\']*["\']', re.IGNORECASE),
+            re.compile(r'>SIGNATURES<', re.IGNORECASE),
+            re.compile(r'>\s*SIGNA\s*<.*?>\s*TURES\s*<', re.IGNORECASE),
+        ]
+        self.item_pattern = re.compile(r'item\s+(\d+[A-Za-z]?)\b', re.IGNORECASE)
+        self.part_item_pattern = re.compile(r'part\s+[IV]+\s*[–-]\s*item\s+(\d+[A-Za-z]?)\b', re.IGNORECASE)
     
     def _clean_text(self, text: str) -> str:
         """
@@ -338,17 +347,9 @@ class SECParser:
 
                 else:
                     # For the last item, search for end-marker IDs as boundary
-                    # Common end markers: signatures, exhibits, index, cover
-                    end_markers = [
-                        r'id\s*=\s*["\']signatures[^"\']*["\']',  # id="signatures_1" or similar
-                        r'id\s*=\s*["\']exhibits[^"\']*["\']',     # id="exhibits_1" or similar
-                        r'id\s*=\s*["\'][^"\']*cover[^"\']*["\']', # Cover page markers
-                        r'>SIGNATURES<',                            # Fallback: text search
-                        r'>\s*SIGNA\s*<.*?>\s*TURES\s*<',          # Split across tags
-                    ]
-                    
-                    for marker_pattern in end_markers:
-                        marker_match = re.search(marker_pattern, html_content[start_pos:], re.IGNORECASE)
+                    # OPTIMIZED: Use pre-compiled patterns instead of compiling on each use
+                    for compiled_pattern in self.end_marker_patterns:
+                        marker_match = compiled_pattern.search(html_content[start_pos:])
                         if marker_match:
                             # Find the tag opening < before this marker
                             marker_pos_in_full = start_pos + marker_match.start()
