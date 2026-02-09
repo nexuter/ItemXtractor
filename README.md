@@ -95,26 +95,33 @@ extractor.extract(
 
 ## File Structure
 
-Extracted filings and items are organized as follows:
+Extracted filings and items are organized by **CIK number**. When using `--ticker`, the tool automatically converts it to CIK for consistent folder naming:
 
 ```
 sec_filings/
-├── AAPL/
+├── 0000320193/              # AAPL CIK
 │   └── 2023/
 │       └── 10-K/
-│           ├── AAPL_2023_10-K.html          # Original filing
+│           ├── 0000320193_2023_10-K.html    # Original filing
 │           └── items/
-│               ├── AAPL_2023_10-K_item1.json
-│               ├── AAPL_2023_10-K_item1A.json
-│               ├── AAPL_2023_10-K_item7.json
+│               ├── 0000320193_2023_10-K_item1.json
+│               ├── 0000320193_2023_10-K_item1_xtr.json
+│               ├── 0000320193_2023_10-K_item1A.json
+│               ├── 0000320193_2023_10-K_item1A_xtr.json
 │               └── ...
-└── MSFT/
+└── 0000789019/              # MSFT CIK
     └── 2023/
         └── 10-Q/
-            ├── MSFT_2023_10-Q.html
+            ├── 0000789019_2023_10-Q.html
             └── items/
                 └── ...
 ```
+
+**Why CIK-based naming?**
+- ✅ Consistent with SEC EDGAR structure
+- ✅ Prevents duplicate downloads (ticker vs CIK references)
+- ✅ Handles ticker changes over time (CIKs are permanent)
+- ✅ Works seamlessly with full-index downloads
 
 ### Structure Extraction
 
@@ -125,9 +132,9 @@ Structure extraction happens **automatically** during item extraction. Each extr
 python main.py --ticker AAPL --filing 10-K --year 2022
 ```
 
-**Output files:**
-- `AAPL_2022_10-K_item1.json` - Item content (HTML + text)
-- `AAPL_2022_10-K_item1_xtr.json` - Hierarchical structure (automatically created)
+**Output files (in `sec_filings/0000320193/2022/10-K/items/`):**
+- `0000320193_2022_10-K_item1.json` - Item content (HTML + text)
+- `0000320193_2022_10-K_item1_xtr.json` - Hierarchical structure (automatically created)
 
 **Structure file format:**
 

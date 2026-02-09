@@ -143,19 +143,27 @@ class ItemXtractor:
         Returns:
             True if successful, False otherwise
         """
-        # Start logging for this filing
-        filing_record = self.logger.log_filing_start(cik_ticker, year, filing_type)
+        # Convert ticker to CIK for consistent folder naming
+        try:
+            cik = self.downloader.get_cik(cik_ticker)
+            original_identifier = cik_ticker
+        except Exception as e:
+            self.logger.error(f"Failed to resolve {cik_ticker}: {str(e)}")
+            return False
+        
+        # Start logging for this filing (use original identifier for display)
+        filing_record = self.logger.log_filing_start(original_identifier, year, filing_type)
         self.logger.info(
-            f"Filing worker: {threading.current_thread().name} | {cik_ticker} {filing_type} {year}"
+            f"Filing worker: {threading.current_thread().name} | {original_identifier} ({cik}) {filing_type} {year}"
         )
         
         try:
-            # Create directory structure upfront
-            self.file_manager.create_directory_structure(cik_ticker, year, filing_type)
+            # Create directory structure using CIK
+            self.file_manager.create_directory_structure(cik, year, filing_type)
             
-            # Determine file path - try both extensions
-            filing_path_html = self.file_manager.get_filing_path(cik_ticker, year, filing_type, 'html')
-            filing_path_htm = self.file_manager.get_filing_path(cik_ticker, year, filing_type, 'htm')
+            # Determine file path - try both extensions (use CIK for folder)
+            filing_path_html = self.file_manager.get_filing_path(cik, year, filing_type, 'html')
+            filing_path_htm = self.file_manager.get_filing_path(cik, year, filing_type, 'htm')
             
             # Check if file already exists (explicitly checking for FILES, not directories)
             if self.file_manager.file_exists(filing_path_html):
@@ -176,12 +184,13 @@ class ItemXtractor:
                 
                 # Download the filing
                 try:
-                    html_content, extension, _ = self.downloader.download_filing(
+                    html_content, extension, downloaded_cik = self.downloader.download_filing(
                         cik_ticker, filing_type, year
                     )
                     
+                    # Use CIK for file path
                     filing_path = self.file_manager.get_filing_path(
-                        cik_ticker, year, filing_type, extension
+                        cik, year, filing_type, extension
                     )
                     self.file_manager.save_html(filing_path, html_content)
                     self.logger.log_download(filing_record, True, skipped=False)
@@ -214,11 +223,11 @@ class ItemXtractor:
                 # Only extract requested items that exist in TOC
                 items_to_extract = [item for item in items if item in toc_items]
             
-            # Extract items sequentially for a single filing
+            # Extract items sequentially for a single filing (use CIK for folder paths)
             for item_number in items_to_extract:
                 self._extract_and_save_item(
                     item_number, html_content, toc_items,
-                    cik_ticker, year, filing_type, filing_record
+                    cik, year, filing_type, filing_record
                 )
             
             self.logger.log_filing_complete(filing_record)

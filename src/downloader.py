@@ -75,6 +75,19 @@ class SECDownloader:
         
         return cik, cik_or_ticker
     
+    def get_cik(self, cik_or_ticker: str) -> str:
+        """
+        Get CIK number from ticker or CIK
+        
+        Args:
+            cik_or_ticker: CIK number or ticker symbol
+            
+        Returns:
+            CIK number padded to 10 digits
+        """
+        cik, _ = self._normalize_cik(cik_or_ticker)
+        return cik
+    
     def _get_filing_url(self, cik: str, filing_type: str, year: str) -> Optional[str]:
         """
         Get the URL of the filing document
@@ -220,7 +233,7 @@ class SECDownloader:
             year: Filing year
             
         Returns:
-            Tuple of (HTML content, file extension, cik_or_ticker)
+            Tuple of (HTML content, file extension, CIK number padded to 10 digits)
             
         Raises:
             Exception: If download fails
@@ -244,4 +257,4 @@ class SECDownloader:
         if filing_url.endswith('.htm'):
             extension = 'htm'
         
-        return response.text, extension, original_identifier
+        return response.text, extension, cik
