@@ -9,12 +9,12 @@ A professional Python tool for extracting specific items from SEC EDGAR 10-K and
 - 🔄 **Batch Processing**: Extract from multiple companies, years, and filings in one command
 - 🌐 **Full-Index Download**: Download ALL companies' filings when no ticker/CIK specified (uses SEC quarterly index files)
 - 💾 **Skip Downloads**: Automatically skips re-downloading existing files
-- 📝 **Comprehensive Logging**: Detailed logs and JSON reports for each extraction session
+- � **CSV Reports**: Excel-ready CSV reports and real-time extraction logs with O/X success indicators
 - 🎨 **Dual Format Output**: Each item saved as both HTML and plain text in JSON
 - 🔍 **CIK or Ticker**: Works with both CIK numbers and stock ticker symbols
 - ✓ **Amendment Filtering**: Automatically skips amended filings (10-K/A, 10-Q/A), selecting regular filings
 - 🛡️ **Robust Boundary Detection**: Handles edge cases with ID-based markers and HTML parsing variations
-- 📚 **Hierarchical Structure Extraction**: Automatically detects and extracts nested heading-body pairs from items with multi-level hierarchies
+- 📚 **Automatic Structure Extraction**: Detects and extracts nested heading-body pairs automatically during extraction
 - 🔐 **Safety Prompts**: Confirmation required for large-scale downloads (thousands of filings)
 
 ## Installation
@@ -118,14 +118,18 @@ sec_filings/
 
 ### Structure Extraction
 
-After extracting items, you can extract hierarchical heading-body pair structures from within each item. This is useful for further analysis of complex items like Item 1 (Business).
+Structure extraction happens **automatically** during item extraction. Each extracted item gets a corresponding `*_xtr.json` file containing hierarchical heading-body pairs.
 
-Extract hierarchical structures from already extracted items:
+**Example extraction:**
 ```bash
-python main.py --ticker AAPL --filing 10-K --year 2022 --extract-structure
+python main.py --ticker AAPL --filing 10-K --year 2022
 ```
 
-This creates `*_xtr.json` files alongside the original item files, containing the hierarchical structure:
+**Output files:**
+- `AAPL_2022_10-K_item1.json` - Item content (HTML + text)
+- `AAPL_2022_10-K_item1_xtr.json` - Hierarchical structure (automatically created)
+
+**Structure file format:**
 
 ```json
 {
@@ -295,24 +299,78 @@ Do you want to continue? (yes/no):
 
 See [FULL_INDEX_FEATURE.md](FULL_INDEX_FEATURE.md) for detailed documentation.
 
+## CSV Reports and Logs
+
+ItemXtractor generates **Excel-ready CSV files** for easy analysis and monitoring:
+
+### Extraction Log (Real-time)
+- **File**: `logs/extraction_{timestamp}.csv`
+- **Purpose**: Real-time progress tracking as filings complete
+- **Updates**: Row added immediately after each filing completes
+- **Format**: O/X matrix with Download, TOC, and all items
+
+### Final Report
+- **File**: `logs/report_{timestamp}.csv`
+- **Purpose**: Complete summary generated at the end of extraction
+- **Includes**: Success/failure statistics and total runtime
+- **Format**: Same O/X matrix as extraction log + summary section
+
+### CSV Structure
+
+```csv
+Start Time: 2024-01-15 10:30:45
+
+Ticker,Year,Filing Type,Download,TOC,Item 1,Item 1A,Item 1B,Item 2,...,Runtime (s)
+AAPL,2023,10-K,O,O,O,O,O,O,...,45.23
+MSFT,2023,10-K,O,O,O,O,X,O,...,52.18
+GOOGL,2023,10-K,O,X,,,,,,...,12.45
+
+Summary:
+Total Filings Attempted: 3
+Successful Downloads: 3
+Failed Downloads: 0
+Total Items Extracted: 45
+Failed Items: 1
+Total Runtime: 109.86 seconds
+```
+
+### Indicator Legend
+- **O**: Success (item extracted/downloaded)
+- **X**: Failure (error occurred)
+- **Empty**: N/A (item skipped or not applicable)
+
+### Opening in Excel
+Both CSV files can be opened directly in Excel, Google Sheets, or analyzed with Pandas:
+
+```python
+import pandas as pd
+
+# Read extraction log
+df = pd.read_csv('logs/extraction_20240115_103045.csv', skiprows=1)
+
+# Filter failures
+failures = df[(df == 'X').any(axis=1)]
+```
+
 ## Command Line Options
 
 ```
-usage: main.py [-h] (--ticker TICKERS [TICKERS ...] | --cik CIKS [CIKS ...])
+usage: main.py [-h] [--ticker TICKERS [TICKERS ...]] [--cik CIKS [CIKS ...]]
                --filing {10-K,10-Q} [{10-K,10-Q} ...]
                --year YEARS [YEARS ...]
                [--items ITEMS [ITEMS ...]]
                [--output-dir OUTPUT_DIR]
                [--log-dir LOG_DIR]
+               [--workers WORKERS]
 
 Extract items from SEC EDGAR filings
 
 optional arguments:
   -h, --help            show this help message and exit
   --ticker TICKERS [TICKERS ...], --tickers TICKERS [TICKERS ...]
-                        Stock ticker symbol(s)
+                        Stock ticker symbol(s) (optional - omit for all companies)
   --cik CIKS [CIKS ...], --ciks CIKS [CIKS ...]
-                        CIK number(s)
+                        CIK number(s) (optional - omit for all companies)
   --filing {10-K,10-Q} [{10-K,10-Q} ...], --filings {10-K,10-Q} [{10-K,10-Q} ...]
                         Filing type(s)
   --year YEARS [YEARS ...], --years YEARS [YEARS ...]
@@ -322,6 +380,7 @@ optional arguments:
   --output-dir OUTPUT_DIR
                         Output directory for filings (default: sec_filings)
   --log-dir LOG_DIR     Log directory (default: logs)
+  --workers WORKERS     Number of parallel workers (default: 4)
 ```
 
 ## Logging and Reports
