@@ -44,6 +44,10 @@ class ExtractionLogger:
         file_handler.setFormatter(formatter)
         self.logger.addHandler(file_handler)
         
+        # CSV extraction log for concise tracking
+        self.csv_log_file = os.path.join(log_dir, f"extraction_{timestamp}.csv")
+        self.csv_log_written_header = False
+        
         # Session data for report generation
         self.session_data = {
             'start_time': datetime.now().isoformat(),
@@ -182,6 +186,72 @@ class ExtractionLogger:
             self.logger.info(f"Completed {filing_record['cik_ticker']} "
                            f"{filing_record['filing_type']} {filing_record['year']} "
                            f"in {duration:.2f}s - Items: {filing_record['items_extracted']}")
+            
+            # Write to CSV extraction log
+            self._write_csv_log_entry(filing_record)
+    
+    def _write_csv_log_entry(self, filing_record: Dict[str, Any]) -> None:
+        """
+        Write a filing entry to the CSV extraction log
+        
+        Args:
+            filing_record: Filing record dictionary
+        """
+        try:
+            # Get all item columns
+            all_10k_items = list(ITEMS_10K.keys())
+            all_10q_items = list(ITEMS_10Q.keys())
+            
+            # Write header if first entry
+            if not self.csv_log_written_header:
+                with open(self.csv_log_file, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    # Write start time
+                    start_time = datetime.fromisoformat(self.session_data['start_time'])
+                    writer.writerow([f"Start Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}"])
+                    
+                    # Write column headers
+                    headers = ['Ticker', 'Year', 'Filing Type', 'Download', 'TOC']
+                    headers.extend([f'10-K Item {item}' for item in all_10k_items])
+                    headers.extend([f'10-Q Item {item}' for item in all_10q_items])
+                    headers.append('Runtime (sec)')
+                    writer.writerow(headers)
+                self.csv_log_written_header = True
+            
+            # Write data row
+            with open(self.csv_log_file, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                
+                row = [
+                    filing_record['cik_ticker'],
+                    filing_record['year'],
+                    filing_record['filing_type'],
+                    'O' if filing_record['downloaded'] or filing_record['skipped_download'] else 'X',
+                    'O' if filing_record['toc_found'] else 'X'
+                ]
+                
+                # Add O/X for each 10-K item
+                filing_items = set(filing_record['items_extracted'])
+                for item in all_10k_items:
+                    if filing_record['filing_type'] == '10-K':
+                        row.append('O' if item in filing_items else 'X')
+                    else:
+                        row.append('')  # Empty for 10-Q filings
+                
+                # Add O/X for each 10-Q item
+                for item in all_10q_items:
+                    if filing_record['filing_type'] == '10-Q':
+                        row.append('O' if item in filing_items else 'X')
+                    else:
+                        row.append('')  # Empty for 10-K filings
+                
+                # Add runtime
+                runtime = filing_record.get('duration_seconds', 0)
+                row.append(f'{runtime:.2f}')
+                
+                writer.writerow(row)
+        except Exception as e:
+            self.logger.warning(f"Failed to write CSV log entry: {str(e)}")
     
     def generate_report(self) -> str:
         """
