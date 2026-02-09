@@ -129,6 +129,7 @@ Each extracted item is saved as a JSON file with the following structure:
 | 1    | Business |
 | 1A   | Risk Factors |
 | 1B   | Unresolved Staff Comments |
+| 1C   | Cybersecurity |
 | 2    | Properties |
 | 3    | Legal Proceedings |
 | 4    | Mine Safety Disclosures |
@@ -146,6 +147,7 @@ Each extracted item is saved as a JSON file with the following structure:
 | 13   | Certain Relationships and Related Transactions |
 | 14   | Principal Accounting Fees and Services |
 | 15   | Exhibits, Financial Statement Schedules |
+| 16   | Form 10-K Summary |
 
 ### 10-Q Filing Items
 
