@@ -68,18 +68,45 @@ python main.py --filing 10-K --years 2023 2024 2025
 ```
 ⚠️ **Warning**: This will download thousands of filings and may take several hours.
 
-### Peer Firm Similarity (RAG)
+### Peer Firm Analysis (peerfirm.py)
 
-This repo includes a peer-firm search using Gemini embeddings and a local vector index.
-It expects extracted item JSON files under `sec_filings/` (or `--base-dir`).
+Identify similar peer companies using Gemini AI generative models. Two methods are available:
 
-**Build an index (single item):**
+#### Method 1: Heading-Body Analysis (Local, No Indexing)
+Uses the hierarchical structure from extracted items to generate peer recommendations via Gemini:
+
 ```bash
-python peerfirm_index.py --year 2024 --item 1C --filing 10-K --index-dir ./vector_db/peerfirm
+# Set API key (required)
+$env:GEMINI_API_KEY="your-api-key-here"
+
+# Find 5 peers based on Item 1 (Business) disclosure
+python peerfirm.py --method headbody --k 5 --cik 0000001750 --year 2024 --item 1 --output ./output/peerfirm
 ```
 
-**Build indexes for all items (one index per item):**
+This method:
+- ✅ Reads `*_xtr.json` structure files (heading-body pairs)
+- ✅ Constructs detailed business description from hierarchy
+- ✅ Sends to Gemini for peer identification with reasoning
+- ✅ No indexing required - fast for one-off queries
+- ❌ Slower for batch analysis (one API call per company)
+
+**Output files:**
+- `{CIK}_{YEAR}_{ITEM}_{K}_headings_bodies_response.txt` - Formatted peer recommendations with reasoning
+
+#### Method 2: Vector Database Similarity (Indexed, Fast Batch)
+Builds embeddings for all companies and returns top-k similar companies:
+
 ```bash
+# Build vector index for Item 1C (Cybersecurity)
+python peerfirm_index.py --year 2024 --item 1C --filing 10-K --index-dir ./vector_db/peerfirm
+
+# Query the index
+python peerfirm.py --method vdb --k 5 --cik 0000001750 --year 2024 --item 1C --output ./output/peerfirm
+```
+
+**Build indexes for all items:**
+```bash
+# Build one index per item (e.g., 1, 1A, 1B, 1C, 7, ...)
 python peerfirm_index.py --year 2024 --filing 10-K --index-dir ./vector_db/peerfirm
 ```
 
@@ -87,35 +114,81 @@ python peerfirm_index.py --year 2024 --filing 10-K --index-dir ./vector_db/peerf
 ```bash
 python peerfirm_index.py --year 2024 --item 1C --filing 10-K --index-dir ./vector_db/peerfirm --batch-size 20
 ```
+
 Default batch size is `10`. If batch embedding fails, the script automatically falls back to single-item embedding calls.
 
-**Query peers:**
-```bash
-python peerfirm.py --k 5 --cik 0000001750 --year 2024 --item 1C --output ./output/peerfirm
+**Index layout:**
+```
+vector_db/peerfirm/
+├── item_1/
+│   ├── embeddings.npy         # All company embeddings (N x 768)
+│   ├── index.jsonl            # Company metadata (CIK, ticker, embedding index)
+│   └── config.json            # Index metadata
+├── item_1A/
+│   ├── embeddings.npy
+│   ├── index.jsonl
+│   └── config.json
+└── ...
 ```
 
-**Optional prompt file:**
+**Output files (vdb method):**
+- `{CIK}_{YEAR}_{ITEM}_{K}_vdb_matches.txt` - Top-k most similar companies by cosine distance
+
+#### peerfirm.py Command Options
+
 ```bash
-python peerfirm.py --k 5 --cik 0000001750 --year 2024 --item 1C --output ./output/peerfirm --save-prompt --keywords "cloud security, recurring revenue"
+python peerfirm.py --method {headbody|vdb} --k 5 --cik CIK --year YEAR --item ITEM [--output DIR] [--save-prompt] [--keywords KEYWORDS]
+```
+
+**Arguments:**
+- `--method {headbody|vdb}` - Analysis method (default: headbody)
+- `--k` - Number of peers to return (default: 5)
+- `--cik` - Company CIK (10-digit padded)
+- `--year` - Filing year
+- `--item` - Item number (1, 1A, 1B, 1C, 7, etc.)
+- `--output` - Output directory (default: ./output/peerfirm)
+- `--save-prompt` - Save the prompt sent to Gemini API (headbody only)
+- `--keywords` - Custom keywords for peer search prompt (headbody only)
+
+**Example with custom keywords:**
+```bash
+python peerfirm.py --method headbody --k 5 --cik 0000001750 --year 2024 --item 1 --output ./output/peerfirm --save-prompt --keywords "aircraft maintenance, defense contracting, supply chain"
 ```
 
 **Environment variables:**
-- `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) - required
-- `GEMINI_EMBED_MODEL` (default: `gemini-embedding-001`)
-- `GEMINI_GEN_MODEL` (default: `gemini-3-flash-preview`)
+- `GEMINI_API_KEY` or `GOOGLE_API_KEY` - **Required**. Get from [Google AI Studio](https://aistudio.google.com/app/apikey)
+- `GEMINI_EMBED_MODEL` (default: `gemini-embedding-001`) - Embedding model for vdb method
+- `GEMINI_GEN_MODEL` (default: `gemini-2-flash-preview`) - Generation model for headbody analysis
 - `GEMINI_API_BASE` (default: `https://generativelanguage.googleapis.com/v1beta`)
 - `GEMINI_MAX_RETRIES` (default: `5`)
-- `GEMINI_BACKOFF_BASE` seconds (default: `2.0`, exponential backoff)
+- `GEMINI_BACKOFF_BASE` (default: `2.0` seconds) - Exponential backoff base for rate limiting
 
-**Index layout:**
-- `vector_db/peerfirm/item_1C/embeddings.npy`
-- `vector_db/peerfirm/item_1C/index.jsonl`
-- `vector_db/peerfirm/item_1C/config.json`
+**Set environment variable (Windows PowerShell):**
+```powershell
+$env:GEMINI_API_KEY="your-api-key-here"
+python peerfirm.py --method headbody --k 5 --cik 0000001750 --year 2024 --item 1 --output ./output/peerfirm
+```
 
-**TODO**
-- Compare `--method head` / `headbody` vs `vdb` results on a fixed benchmark set
+#### Choosing a Method
+
+| Aspect | headbody | vdb |
+|--------|----------|-----|
+| **Setup** | None (use directly) | Requires indexing |
+| **Speed (single query)** | Slower (1 API call) | Instant |
+| **Speed (batch)** | Very slow (N API calls) | Fast (all at once) |
+| **Quality** | Generative (reasons) | Similarity-based |
+| **Cost** | Higher (API calls/query) | Lower (API calls upfront) |
+| **Best for** | Few one-off queries | Many queries, same year/item |
+
+**Recommendations:**
+- Use `headbody` for initial exploration and detailed reasoning
+- Use `vdb` for batch analysis across multiple companies/years
+- Combine both: use `vdb` to find candidates, then `headbody` for detailed analysis
+
+#### TODO
 - Add prompt/response evaluation metrics (e.g., agreement with known peer sets)
 - Add optional candidate filtering by SIC/NAICS before similarity ranking
+- Compare `--method headbody` vs `vdb` results on benchmark set
 
 ### Python API Usage
 
