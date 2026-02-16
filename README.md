@@ -68,6 +68,55 @@ python main.py --filing 10-K --years 2023 2024 2025
 ```
 ⚠️ **Warning**: This will download thousands of filings and may take several hours.
 
+### Peer Firm Similarity (RAG)
+
+This repo includes a peer-firm search using Gemini embeddings and a local vector index.
+It expects extracted item JSON files under `sec_filings/` (or `--base-dir`).
+
+**Build an index (single item):**
+```bash
+python peerfirm_index.py --year 2024 --item 1C --filing 10-K --index-dir ./vector_db/peerfirm
+```
+
+**Build indexes for all items (one index per item):**
+```bash
+python peerfirm_index.py --year 2024 --filing 10-K --index-dir ./vector_db/peerfirm
+```
+
+**Batch embeddings (reduce API calls):**
+```bash
+python peerfirm_index.py --year 2024 --item 1C --filing 10-K --index-dir ./vector_db/peerfirm --batch-size 20
+```
+Default batch size is `10`. If batch embedding fails, the script automatically falls back to single-item embedding calls.
+
+**Query peers:**
+```bash
+python peerfirm.py --k 5 --cik 0000001750 --year 2024 --item 1C --output ./output/peerfirm
+```
+
+**Optional prompt file:**
+```bash
+python peerfirm.py --k 5 --cik 0000001750 --year 2024 --item 1C --output ./output/peerfirm --save-prompt --keywords "cloud security, recurring revenue"
+```
+
+**Environment variables:**
+- `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) - required
+- `GEMINI_EMBED_MODEL` (default: `gemini-embedding-001`)
+- `GEMINI_GEN_MODEL` (default: `gemini-3-flash-preview`)
+- `GEMINI_API_BASE` (default: `https://generativelanguage.googleapis.com/v1beta`)
+- `GEMINI_MAX_RETRIES` (default: `5`)
+- `GEMINI_BACKOFF_BASE` seconds (default: `2.0`, exponential backoff)
+
+**Index layout:**
+- `vector_db/peerfirm/item_1C/embeddings.npy`
+- `vector_db/peerfirm/item_1C/index.jsonl`
+- `vector_db/peerfirm/item_1C/config.json`
+
+**TODO**
+- Compare `--method head` / `headbody` vs `vdb` results on a fixed benchmark set
+- Add prompt/response evaluation metrics (e.g., agreement with known peer sets)
+- Add optional candidate filtering by SIC/NAICS before similarity ranking
+
 ### Python API Usage
 
 ```python
@@ -359,6 +408,29 @@ df = pd.read_csv('logs/extraction_20240115_103045.csv', skiprows=1)
 failures = df[(df == 'X').any(axis=1)]
 ```
 
+## Filing Statistics Report (stat.py)
+
+Generate a **comprehensive descriptive statistics report** from downloaded filings and extracted structures:
+
+```bash
+python stat.py --folder sec_filings
+```
+
+**Output:**
+- `stats/filing_analysis_{timestamp}.md`
+
+**What it includes:**
+- Item extraction counts by year (sorted by `ITEMS_10K`)
+- Structure depth metrics by year
+- Headings & bodies statistics by item and year
+- Extra/unknown item investigation with CIK + TOC titles
+- Error report summary by year
+
+**Notes:**
+- Uses TOC-derived `item_title` from extracted item JSON
+- Groups sub-items (e.g., `8A`, `8B`) under their parent item (`8`)
+- Designed for large datasets (no HTML parsing required)
+
 ## Command Line Options
 
 ```
@@ -447,6 +519,7 @@ extractor.extract(
 - `beautifulsoup4>=4.12.0` - HTML parsing
 - `lxml>=4.9.0` - Fast XML/HTML parsing
 - `html5lib>=1.1` - HTML5 parsing support
+- `numpy>=1.24.0` - Vector math for peer-firm similarity
 
 ## SEC API Guidelines
 

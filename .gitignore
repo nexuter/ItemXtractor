@@ -40,6 +40,10 @@ sec_filings/
 *.log
 logs/
 
+# Output
+output/
+Archive/
+
 # OS
 .DS_Store
 Thumbs.db
