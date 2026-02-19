@@ -9,7 +9,7 @@ import os
 import threading
 from datetime import datetime
 from typing import Dict, Any, List
-from config import LOGS_DIR, LOG_FORMAT, LOG_DATE_FORMAT, ITEMS_10K, ITEMS_10Q
+from script.config import LOGS_DIR, LOG_FORMAT, LOG_DATE_FORMAT, ITEMS_10K, ITEMS_10Q
 
 
 class ExtractionLogger:

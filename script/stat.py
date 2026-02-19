@@ -12,9 +12,12 @@ import statistics
 import sys
 import re
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
-from config import ITEMS_10K, ITEMS_10Q
+# Add project root to path for imports when run as a script.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from script.config import ITEMS_10K, ITEMS_10Q
 
 class FilingAnalyzer:
     """Analyzes SEC filings and generates statistics report"""

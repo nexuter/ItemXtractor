@@ -37,7 +37,7 @@ cd ItemXtractor
 pip install -r requirements.txt
 ```
 
-3. **Important**: Update the User-Agent in `config.py`:
+3. **Important**: Update the User-Agent in `script/config.py`:
 ```python
 SEC_USER_AGENT = "ItemXtractor/1.0 (Research Tool; your.email@domain.com)"
 ```
@@ -49,151 +49,29 @@ The SEC requires a valid email in the User-Agent header.
 
 Extract all items from Apple's 2023 10-K:
 ```bash
-python main.py --ticker AAPL --filing 10-K --year 2023
+python script/main.py --ticker AAPL --filing 10-K --year 2023
 ```
 
 Extract specific items (Risk Factors and MD&A) from Microsoft's 2023 10-K:
 ```bash
-python main.py --ticker MSFT --filing 10-K --year 2023 --items 1A 7
+python script/main.py --ticker MSFT --filing 10-K --year 2023 --items 1A 7
 ```
 
 Extract from multiple companies and years:
 ```bash
-python main.py --tickers AAPL MSFT GOOGL --filing 10-K --years 2022 2023
+python script/main.py --tickers AAPL MSFT GOOGL --filing 10-K --years 2022 2023
 ```
 
 Download ALL companies for specific years (no ticker/CIK specified):
 ```bash
-python main.py --filing 10-K --years 2023 2024 2025
+python script/main.py --filing 10-K --years 2023 2024 2025
 ```
 ⚠️ **Warning**: This will download thousands of filings and may take several hours.
-
-### Peer Firm Analysis (peerfirm.py)
-
-Identify similar peer companies using Gemini AI generative models. Two methods are available:
-
-#### Method 1: Heading-Body Analysis (Local, No Indexing)
-Uses the hierarchical structure from extracted items to generate peer recommendations via Gemini:
-
-```bash
-# Set API key (required)
-$env:GEMINI_API_KEY="your-api-key-here"
-
-# Find 5 peers based on Item 1 (Business) disclosure
-python peerfirm.py --method headbody --k 5 --cik 0000001750 --year 2024 --item 1 --output ./output/peerfirm
-```
-
-This method:
-- ✅ Reads `*_xtr.json` structure files (heading-body pairs)
-- ✅ Constructs detailed business description from hierarchy
-- ✅ Sends to Gemini for peer identification with reasoning
-- ✅ No indexing required - fast for one-off queries
-- ❌ Slower for batch analysis (one API call per company)
-
-**Output files:**
-- `{CIK}_{YEAR}_{ITEM}_{K}_headings_bodies_response.txt` - Formatted peer recommendations with reasoning
-
-#### Method 2: Vector Database Similarity (Indexed, Fast Batch)
-Builds embeddings for all companies and returns top-k similar companies:
-
-```bash
-# Build vector index for Item 1C (Cybersecurity)
-python peerfirm_index.py --year 2024 --item 1C --filing 10-K --index-dir ./vector_db/peerfirm
-
-# Query the index
-python peerfirm.py --method vdb --k 5 --cik 0000001750 --year 2024 --item 1C --output ./output/peerfirm
-```
-
-**Build indexes for all items:**
-```bash
-# Build one index per item (e.g., 1, 1A, 1B, 1C, 7, ...)
-python peerfirm_index.py --year 2024 --filing 10-K --index-dir ./vector_db/peerfirm
-```
-
-**Batch embeddings (reduce API calls):**
-```bash
-python peerfirm_index.py --year 2024 --item 1C --filing 10-K --index-dir ./vector_db/peerfirm --batch-size 20
-```
-
-Default batch size is `10`. If batch embedding fails, the script automatically falls back to single-item embedding calls.
-
-**Index layout:**
-```
-vector_db/peerfirm/
-├── item_1/
-│   ├── embeddings.npy         # All company embeddings (N x 768)
-│   ├── index.jsonl            # Company metadata (CIK, ticker, embedding index)
-│   └── config.json            # Index metadata
-├── item_1A/
-│   ├── embeddings.npy
-│   ├── index.jsonl
-│   └── config.json
-└── ...
-```
-
-**Output files (vdb method):**
-- `{CIK}_{YEAR}_{ITEM}_{K}_vdb_matches.txt` - Top-k most similar companies by cosine distance
-
-#### peerfirm.py Command Options
-
-```bash
-python peerfirm.py --method {headbody|vdb} --k 5 --cik CIK --year YEAR --item ITEM [--output DIR] [--save-prompt] [--keywords KEYWORDS]
-```
-
-**Arguments:**
-- `--method {headbody|vdb}` - Analysis method (default: headbody)
-- `--k` - Number of peers to return (default: 5)
-- `--cik` - Company CIK (10-digit padded)
-- `--year` - Filing year
-- `--item` - Item number (1, 1A, 1B, 1C, 7, etc.)
-- `--output` - Output directory (default: ./output/peerfirm)
-- `--save-prompt` - Save the prompt sent to Gemini API (headbody only)
-- `--keywords` - Custom keywords for peer search prompt (headbody only)
-
-**Example with custom keywords:**
-```bash
-python peerfirm.py --method headbody --k 5 --cik 0000001750 --year 2024 --item 1 --output ./output/peerfirm --save-prompt --keywords "aircraft maintenance, defense contracting, supply chain"
-```
-
-**Environment variables:**
-- `GEMINI_API_KEY` or `GOOGLE_API_KEY` - **Required**. Get from [Google AI Studio](https://aistudio.google.com/app/apikey)
-- `GEMINI_EMBED_MODEL` (default: `gemini-embedding-001`) - Embedding model for vdb method
-- `GEMINI_GEN_MODEL` (default: `gemini-2-flash-preview`) - Generation model for headbody analysis
-- `GEMINI_API_BASE` (default: `https://generativelanguage.googleapis.com/v1beta`)
-- `GEMINI_MAX_RETRIES` (default: `5`)
-- `GEMINI_BACKOFF_BASE` (default: `2.0` seconds) - Exponential backoff base for rate limiting
-
-**Set environment variable (Windows PowerShell):**
-```powershell
-$env:GEMINI_API_KEY="your-api-key-here"
-python peerfirm.py --method headbody --k 5 --cik 0000001750 --year 2024 --item 1 --output ./output/peerfirm
-```
-
-#### Choosing a Method
-
-| Aspect | headbody | vdb |
-|--------|----------|-----|
-| **Setup** | None (use directly) | Requires indexing |
-| **Speed (single query)** | Slower (1 API call) | Instant |
-| **Speed (batch)** | Very slow (N API calls) | Fast (all at once) |
-| **Quality** | Generative (reasons) | Similarity-based |
-| **Cost** | Higher (API calls/query) | Lower (API calls upfront) |
-| **Best for** | Few one-off queries | Many queries, same year/item |
-
-**Recommendations:**
-- Use `headbody` for initial exploration and detailed reasoning
-- Use `vdb` for batch analysis across multiple companies/years
-- Combine both: use `vdb` to find candidates, then `headbody` for detailed analysis
-
-#### TODO
-- Add prompt/response evaluation metrics (e.g., agreement with known peer sets)
-- Add optional candidate filtering by SIC/NAICS before similarity ranking
-- Compare `--method headbody` vs `vdb` results on benchmark set
 
 ### Python API Usage
 
 ```python
-from main import ItemXtractor
+from script.main import ItemXtractor
 
 # Create extractor instance
 extractor = ItemXtractor()
@@ -251,7 +129,7 @@ Structure extraction happens **automatically** during item extraction. Each extr
 
 **Example extraction:**
 ```bash
-python main.py --ticker AAPL --filing 10-K --year 2022
+python script/main.py --ticker AAPL --filing 10-K --year 2022
 ```
 
 **Output files (in `sec_filings/0000320193/2022/10-K/items/`):**
@@ -375,13 +253,13 @@ When no `--ticker` or `--cik` is specified, ItemXtractor automatically downloads
 
 ```bash
 # Download ALL 10-K filings for 2024 (will prompt for confirmation)
-python main.py --filing 10-K --year 2024
+python script/main.py --filing 10-K --year 2024
 
 # Download ALL companies across multiple years
-python main.py --filing 10-K --years 2023 2024 2025
+python script/main.py --filing 10-K --years 2023 2024 2025
 
 # Download all companies but extract specific items only
-python main.py --filing 10-K --year 2024 --items 1 1A 7
+python script/main.py --filing 10-K --year 2024 --items 1 1A 7
 ```
 
 ### Expected Volume & Time
@@ -426,7 +304,7 @@ Do you want to continue? (yes/no):
 3. **Monitor disk space** before starting large downloads
 4. **Use high `--workers`** count for parallel processing (e.g., `--workers 16`)
 
-See [FULL_INDEX_FEATURE.md](FULL_INDEX_FEATURE.md) for detailed documentation.
+See [docs/full-index-feature.md](docs/full-index-feature.md) for detailed documentation.
 
 ## CSV Reports and Logs
 
@@ -481,12 +359,12 @@ df = pd.read_csv('logs/extraction_20240115_103045.csv', skiprows=1)
 failures = df[(df == 'X').any(axis=1)]
 ```
 
-## Filing Statistics Report (stat.py)
+## Filing Statistics Report (script/stat.py)
 
 Generate a **comprehensive descriptive statistics report** from downloaded filings and extracted structures:
 
 ```bash
-python stat.py --folder sec_filings
+python script/stat.py --folder sec_filings
 ```
 
 **Output:**
@@ -507,7 +385,7 @@ python stat.py --folder sec_filings
 ## Command Line Options
 
 ```
-usage: main.py [-h] [--ticker TICKERS [TICKERS ...]] [--cik CIKS [CIKS ...]]
+usage: script/main.py [-h] [--ticker TICKERS [TICKERS ...]] [--cik CIKS [CIKS ...]]
                --filing {10-K,10-Q} [{10-K,10-Q} ...]
                --year YEARS [YEARS ...]
                [--items ITEMS [ITEMS ...]]
@@ -561,7 +439,7 @@ Each JSON report includes:
 For programmatic use, import and instantiate the `ItemXtractor` class:
 
 ```python
-from main import ItemXtractor
+from script.main import ItemXtractor
 
 extractor = ItemXtractor()
 extractor.extract(
@@ -592,12 +470,11 @@ extractor.extract(
 - `beautifulsoup4>=4.12.0` - HTML parsing
 - `lxml>=4.9.0` - Fast XML/HTML parsing
 - `html5lib>=1.1` - HTML5 parsing support
-- `numpy>=1.24.0` - Vector math for peer-firm similarity
 
 ## SEC API Guidelines
 
 This tool follows SEC EDGAR's API guidelines:
-- Maximum 10 requests per second (configurable in `config.py`)
+- Maximum 10 requests per second (configurable in `script/config.py`)
 - Declares a User-Agent header with contact information
 - Respects robots.txt
 
@@ -662,3 +539,5 @@ For issues, questions, or contributions, please use the GitHub issue tracker.
 ---
 
 **Disclaimer**: This tool is for research and educational purposes. Always verify extracted data against original SEC filings. The authors are not responsible for any decisions made based on data extracted using this tool.
+
+

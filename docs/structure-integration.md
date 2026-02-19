@@ -8,7 +8,7 @@ This patch adds:
 4. Add _extract_item_structure() worker method
 """
 
-# Changes needed in main.py:
+# Changes needed in script/main.py:
 
 # 1. Add import (after line 15):
 from src.structure_extractor import StructureExtractor
@@ -161,3 +161,4 @@ def extract_structures(self, cik_tickers: Union[str, List[str]],
     summary = f"Structure extraction complete: {successful} successful, {failed} failed"
     self.logger.info(summary)
     return summary
+

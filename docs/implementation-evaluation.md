@@ -88,7 +88,7 @@
 - Graceful error handling (404s, network errors)
 - Progress reporting during scan
 
-### Modified Component: `main.py`
+### Modified Component: `script/main.py`
 
 **Changes:**
 1. Import `SECIndexParser`
@@ -218,7 +218,7 @@ Quarters to check: 8
 - Export CIK list to file before downloading
 
 ## Documentation
-- ✅ FULL_INDEX_FEATURE.md - Comprehensive guide
+- ✅ docs/full-index-feature.md - Comprehensive guide
 - ✅ README.md - Updated with feature and examples
 - ✅ Command help - Updated with new example
 - ✅ Test scripts - Validation and demonstration
@@ -228,3 +228,4 @@ Quarters to check: 8
 The full-index download feature is **ready for production** with appropriate safeguards in place. Users can now download all companies' filings by simply omitting the `--ticker`/`--cik` arguments, making ItemXtractor a powerful tool for comprehensive SEC filing analysis.
 
 **Next Step**: Clean up test files and prepare commit.
+

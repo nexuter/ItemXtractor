@@ -8,8 +8,14 @@ using the Table of Contents to locate each item within the filing.
 import os
 import sys
 import threading
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Union
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.downloader import SECDownloader
 from src.parser import SECParser
 from src.extractor import ItemExtractor
@@ -17,7 +23,7 @@ from src.structure_extractor import StructureExtractor
 from src.index_parser import SECIndexParser
 from utils.logger import ExtractionLogger
 from utils.file_manager import FileManager
-from config import ITEMS_10K, ITEMS_10Q
+from script.config import ITEMS_10K, ITEMS_10Q
 
 
 class ItemXtractor:
@@ -314,19 +320,19 @@ def main():
         epilog="""
 Examples:
   # Extract all items from Apple's 2023 10-K
-  python main.py --ticker AAPL --filing 10-K --year 2023
+  python script/main.py --ticker AAPL --filing 10-K --year 2023
   
   # Extract specific items from Microsoft's 2022 and 2023 10-K
-  python main.py --ticker MSFT --filing 10-K --years 2022 2023 --items 1 1A 7
+  python script/main.py --ticker MSFT --filing 10-K --years 2022 2023 --items 1 1A 7
   
   # Extract from multiple companies
-  python main.py --tickers AAPL MSFT GOOGL --filing 10-K --year 2023
+  python script/main.py --tickers AAPL MSFT GOOGL --filing 10-K --year 2023
   
   # Use CIK instead of ticker
-  python main.py --cik 0000320193 --filing 10-K --year 2023
+  python script/main.py --cik 0000320193 --filing 10-K --year 2023
   
   # Download ALL companies for specific years (no ticker/CIK specified)
-  python main.py --filing 10-K --years 2023 2024 2025
+  python script/main.py --filing 10-K --years 2023 2024 2025
         """
     )
     
@@ -421,3 +427,4 @@ Examples:
 
 if __name__ == "__main__":
     main()
+

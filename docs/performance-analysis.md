@@ -125,7 +125,7 @@ while words:
 ---
 
 ### 5. **SEQUENTIAL ITEM EXTRACTION**
-**Location:** `main.py` - `process_filing()` method  
+**Location:** `script/main.py` - `process_filing()` method  
 **Issue:** Processes items one at a time in a loop
 
 **Current Code:**
@@ -226,3 +226,4 @@ for item_number in items_to_extract:
 
 ## After Phase 1 + Phase 2 Optimizations (Expected)
 **Target:** 3-5 minutes (40-50x improvement)
+
