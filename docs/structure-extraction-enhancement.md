@@ -73,14 +73,14 @@ After enhancement (nested structure):
   - `_build_hierarchy()`: New method to create nested structure from flat list
   - Removed old flat extraction methods
 
-- `script/main.py`: No changes (integration remains the same)
+- `script/extractor.py`: No changes (integration remains the same)
 - `README.md`: Added documentation section on structure extraction
 
 ## Usage
 
 Extract structures from already extracted items:
 ```bash
-python script/main.py --ticker AAPL --filing 10-K --year 2022 --extract-structure
+python script/extractor.py --ticker AAPL --filing 10-K --year 2022 --extract-structure
 ```
 
 This creates files like: `AAPL_2022_10-K_item1_xtr.json` with nested structure.
@@ -101,4 +101,5 @@ Tested on:
 - ✅ MSFT 2022 Item 1: Simple text item (no nested structure)
 
 All working correctly with proper structure detection.
+
 

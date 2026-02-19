@@ -156,3 +156,4 @@ Total: ~30.4s (items take turns on 4 workers)
 **For 30 companies × 5 years:**
 - Baseline: 3 hours
 - With Phase 1+2: **38-43 minutes** (4.2x-4.7x faster)
+

@@ -88,7 +88,7 @@
 - Graceful error handling (404s, network errors)
 - Progress reporting during scan
 
-### Modified Component: `script/main.py`
+### Modified Component: `script/extractor.py`
 
 **Changes:**
 1. Import `SECIndexParser`
@@ -228,4 +228,5 @@ Quarters to check: 8
 The full-index download feature is **ready for production** with appropriate safeguards in place. Users can now download all companies' filings by simply omitting the `--ticker`/`--cik` arguments, making ItemXtractor a powerful tool for comprehensive SEC filing analysis.
 
 **Next Step**: Clean up test files and prepare commit.
+
 

@@ -320,19 +320,19 @@ def main():
         epilog="""
 Examples:
   # Extract all items from Apple's 2023 10-K
-  python script/main.py --ticker AAPL --filing 10-K --year 2023
+  python script/extractor.py --ticker AAPL --filing 10-K --year 2023
   
   # Extract specific items from Microsoft's 2022 and 2023 10-K
-  python script/main.py --ticker MSFT --filing 10-K --years 2022 2023 --items 1 1A 7
+  python script/extractor.py --ticker MSFT --filing 10-K --years 2022 2023 --items 1 1A 7
   
   # Extract from multiple companies
-  python script/main.py --tickers AAPL MSFT GOOGL --filing 10-K --year 2023
+  python script/extractor.py --tickers AAPL MSFT GOOGL --filing 10-K --year 2023
   
   # Use CIK instead of ticker
-  python script/main.py --cik 0000320193 --filing 10-K --year 2023
+  python script/extractor.py --cik 0000320193 --filing 10-K --year 2023
   
   # Download ALL companies for specific years (no ticker/CIK specified)
-  python script/main.py --filing 10-K --years 2023 2024 2025
+  python script/extractor.py --filing 10-K --years 2023 2024 2025
         """
     )
     
@@ -427,4 +427,5 @@ Examples:
 
 if __name__ == "__main__":
     main()
+
 

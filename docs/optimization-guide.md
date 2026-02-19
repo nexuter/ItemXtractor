@@ -221,7 +221,7 @@ class ItemExtractor:
 
 ## Medium Priority: Parallel Item Extraction (10-15x speedup)
 
-### Current Code (in script/main.py):
+### Current Code (in script/extractor.py):
 ```python
 def process_filing(self, cik_ticker, year, filing_type, items=None):
     # ... parse TOC ...
@@ -328,7 +328,7 @@ class ItemXtractor:
 
 ### Phase 2: Parallel (1-2 hours, expect 10-15x additional for extraction)
 ```
-1. Add ThreadPoolExecutor to script/main.py
+1. Add ThreadPoolExecutor to script/extractor.py
 2. Create worker method _extract_and_save_item()
 3. Add thread-safe logging with lock
 4. Test with various max_workers values (2, 4, 8)
@@ -372,4 +372,5 @@ class ItemXtractor:
    - Risk: Logging race conditions
    - Mitigation: Use threading.Lock() for logger calls
    - Test with max_workers=8 to stress test
+
 

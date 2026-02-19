@@ -49,29 +49,29 @@ The SEC requires a valid email in the User-Agent header.
 
 Extract all items from Apple's 2023 10-K:
 ```bash
-python script/main.py --ticker AAPL --filing 10-K --year 2023
+python script/extractor.py --ticker AAPL --filing 10-K --year 2023
 ```
 
 Extract specific items (Risk Factors and MD&A) from Microsoft's 2023 10-K:
 ```bash
-python script/main.py --ticker MSFT --filing 10-K --year 2023 --items 1A 7
+python script/extractor.py --ticker MSFT --filing 10-K --year 2023 --items 1A 7
 ```
 
 Extract from multiple companies and years:
 ```bash
-python script/main.py --tickers AAPL MSFT GOOGL --filing 10-K --years 2022 2023
+python script/extractor.py --tickers AAPL MSFT GOOGL --filing 10-K --years 2022 2023
 ```
 
 Download ALL companies for specific years (no ticker/CIK specified):
 ```bash
-python script/main.py --filing 10-K --years 2023 2024 2025
+python script/extractor.py --filing 10-K --years 2023 2024 2025
 ```
 ⚠️ **Warning**: This will download thousands of filings and may take several hours.
 
 ### Python API Usage
 
 ```python
-from script.main import ItemXtractor
+from script.extractor import ItemXtractor
 
 # Create extractor instance
 extractor = ItemXtractor()
@@ -129,7 +129,7 @@ Structure extraction happens **automatically** during item extraction. Each extr
 
 **Example extraction:**
 ```bash
-python script/main.py --ticker AAPL --filing 10-K --year 2022
+python script/extractor.py --ticker AAPL --filing 10-K --year 2022
 ```
 
 **Output files (in `sec_filings/0000320193/2022/10-K/items/`):**
@@ -253,13 +253,13 @@ When no `--ticker` or `--cik` is specified, ItemXtractor automatically downloads
 
 ```bash
 # Download ALL 10-K filings for 2024 (will prompt for confirmation)
-python script/main.py --filing 10-K --year 2024
+python script/extractor.py --filing 10-K --year 2024
 
 # Download ALL companies across multiple years
-python script/main.py --filing 10-K --years 2023 2024 2025
+python script/extractor.py --filing 10-K --years 2023 2024 2025
 
 # Download all companies but extract specific items only
-python script/main.py --filing 10-K --year 2024 --items 1 1A 7
+python script/extractor.py --filing 10-K --year 2024 --items 1 1A 7
 ```
 
 ### Expected Volume & Time
@@ -385,7 +385,7 @@ python script/stat.py --folder sec_filings
 ## Command Line Options
 
 ```
-usage: script/main.py [-h] [--ticker TICKERS [TICKERS ...]] [--cik CIKS [CIKS ...]]
+usage: script/extractor.py [-h] [--ticker TICKERS [TICKERS ...]] [--cik CIKS [CIKS ...]]
                --filing {10-K,10-Q} [{10-K,10-Q} ...]
                --year YEARS [YEARS ...]
                [--items ITEMS [ITEMS ...]]
@@ -439,7 +439,7 @@ Each JSON report includes:
 For programmatic use, import and instantiate the `ItemXtractor` class:
 
 ```python
-from script.main import ItemXtractor
+from script.extractor import ItemXtractor
 
 extractor = ItemXtractor()
 extractor.extract(
@@ -539,5 +539,6 @@ For issues, questions, or contributions, please use the GitHub issue tracker.
 ---
 
 **Disclaimer**: This tool is for research and educational purposes. Always verify extracted data against original SEC filings. The authors are not responsible for any decisions made based on data extracted using this tool.
+
 
 
