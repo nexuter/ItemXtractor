@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.downloader import SECDownloader
 from src.index_parser import SECIndexParser
-from utils.file_manager import FileManager
+from src.file_manager import FileManager
 
 
 FILING_CODE_MAP: Dict[str, Tuple[str, str]] = {

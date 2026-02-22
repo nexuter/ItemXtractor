@@ -9,5 +9,6 @@ __author__ = "ItemXtractor Contributors"
 from .downloader import SECDownloader
 from .parser import SECParser
 from .extractor import ItemExtractor
+from .file_manager import FileManager
 
-__all__ = ['SECDownloader', 'SECParser', 'ItemExtractor']
+__all__ = ['SECDownloader', 'SECParser', 'ItemExtractor', 'FileManager']
