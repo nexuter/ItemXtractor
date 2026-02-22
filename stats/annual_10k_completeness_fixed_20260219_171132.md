@@ -1,0 +1,1 @@
+# Annual 10-K Completeness Report (Index-Driven)\n\nGenerated: 2026-02-19 17:11:34\n\n| Year | Total CIK in EDGAR 10-K Index | Current Filings | Missing Disclosures |\n|---|---:|---:|---:|\n| 2023 | 7243 | 6222 | 1021 |\n| 2024 | 6768 | 5657 | 1111 |\n

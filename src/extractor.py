@@ -3,6 +3,7 @@ Item Extractor - Extracts individual items from SEC filings
 """
 
 import re
+import unicodedata
 from typing import Dict, List, Any
 from bs4 import BeautifulSoup
 from .parser import SECParser
@@ -27,6 +28,95 @@ class ItemExtractor:
             "table of contents", "page", "form", "10-k", "10-q", "10-a",
             "form 10-k summary", "not applicable"
         }
+        self._zero_width_chars = ["\u200b", "\u200c", "\u200d", "\ufeff", "\u2060"]
+
+    def _normalize_unicode(self, text: str) -> str:
+        """
+        Remove invisible unicode artifacts and normalize common smart punctuation.
+        """
+        text = unicodedata.normalize("NFKC", text)
+        for ch in self._zero_width_chars:
+            text = text.replace(ch, "")
+        # Remove any remaining unicode formatting/control artifacts.
+        text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+        # Remove common bullet/ornament symbols that pollute extracted prose.
+        text = re.sub(r"[\u2022\u25CF\u25A0\u25AA\u25E6\u2043\u2219]", " ", text)
+        return (
+            text.replace("\u2018", "'")
+            .replace("\u2019", "'")
+            .replace("\u201c", '"')
+            .replace("\u201d", '"')
+            .replace("\u2013", "-")
+            .replace("\u2014", "-")
+        )
+
+    def _remove_line_artifacts(self, text: str) -> str:
+        """
+        Remove generic line-level artifacts such as page numbers and repeated headers.
+        """
+        raw_lines = [ln.strip() for ln in text.splitlines()]
+        lines: List[str] = []
+
+        def prev_non_empty(idx: int) -> str:
+            j = idx - 1
+            while j >= 0:
+                if raw_lines[j]:
+                    return raw_lines[j]
+                j -= 1
+            return ""
+
+        def next_non_empty(idx: int) -> str:
+            j = idx + 1
+            while j < len(raw_lines):
+                if raw_lines[j]:
+                    return raw_lines[j]
+                j += 1
+            return ""
+
+        for idx, line in enumerate(raw_lines):
+            if not line:
+                continue
+            low = line.lower()
+            if low == "table of contents":
+                continue
+            if re.fullmatch(r"page\s+\d{1,4}(?:\s+of\s+\d{1,4})?", low):
+                continue
+            lines.append(line)
+        cleaned = "\n".join(lines)
+        # Remove inline TOC headers if they survived line filtering.
+        cleaned = re.sub(r"\btable of contents\b", " ", cleaned, flags=re.IGNORECASE)
+        return cleaned
+
+    def _postprocess_item_text(self, text: str, item_number: str) -> str:
+        """
+        Final text cleanup with item-aware rules:
+        - Remove leading page-number noise before the item heading
+        - Treat early 'Not applicable.' as terminal item content
+        """
+        out = text.strip()
+
+        # Remove leading page number immediately before item heading
+        out = re.sub(r'^\s*\d{1,3}\s+(?=ITEM\s+\d+[A-Z]?\b)', '', out, flags=re.IGNORECASE)
+
+        # Trim any preamble before first explicit item heading for this item
+        item_head = re.search(rf'ITEM\s+{re.escape(item_number)}(?:\b|[.:])\s*', out, flags=re.IGNORECASE)
+        if item_head:
+            out = out[item_head.start():]
+
+        # If 'Not applicable' appears early, treat it as terminal statement.
+        # This avoids leakage of page/footer or optional appendix text.
+        na_match = re.search(r'\bNot\s+applicable\b(?:\s*[.:;])?', out, flags=re.IGNORECASE)
+        if na_match and na_match.start() <= 350:
+            out = out[:na_match.end()]
+
+        # If 'None' appears early as a terminal statement, stop there as well.
+        none_match = re.search(r'\bNone\b(?:\s*[.:;])?', out, flags=re.IGNORECASE)
+        if none_match and none_match.start() <= 350:
+            out = out[:none_match.end()]
+
+        # Drop trailing standalone page number tokens.
+        out = re.sub(r'\s+\d{1,3}\s*$', '', out)
+        return out.strip()
 
     def _strip_headers_footers(self, text: str) -> str:
         """
@@ -107,12 +197,10 @@ class ItemExtractor:
         for script in soup(['script', 'style']):
             script.decompose()
         
-        # Get text with space separator (standard approach)
-        text = soup.get_text(separator=' ')
-        
-        # Clean up text - collapse multiple spaces and strip
+        text = soup.get_text(separator='\n')
+        text = self._normalize_unicode(text)
+        text = self._remove_line_artifacts(text)
         text = ' '.join(text.split())
-        
         text = self._strip_headers_footers(text)
         return text
     
@@ -184,9 +272,12 @@ class ItemExtractor:
         item_html_clean = str(soup)
         
         # Extract text from the same parsed soup
-        item_text = soup.get_text(separator=' ')
+        item_text = soup.get_text(separator='\n')
+        item_text = self._normalize_unicode(item_text)
+        item_text = self._remove_line_artifacts(item_text)
         item_text = ' '.join(item_text.split())  # Collapse whitespace
         item_text = self._strip_headers_footers(item_text)
+        item_text = self._postprocess_item_text(item_text, item_number)
         
         return {
             'item_number': item_number,
@@ -236,3 +327,4 @@ class ItemExtractor:
         """
         item_numbers = list(toc_items.keys())
         return self.extract_items(html_content, item_numbers, toc_items)
+

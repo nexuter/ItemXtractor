@@ -1,431 +1,297 @@
 """
-ItemXtractor - Main script for extracting items from SEC EDGAR filings
+Extraction-only pipeline.
 
-This script downloads SEC filings (10-K, 10-Q) and extracts specific items
-using the Table of Contents to locate each item within the filing.
+Reads downloaded filing HTML files from filing_dir and performs:
+- item extraction -> *_item.json
+- structure extraction -> *_str.json
 """
 
-import os
+from __future__ import annotations
+
+import argparse
+import csv
+import json
 import sys
-import threading
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional, Union
+from typing import Dict, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.downloader import SECDownloader
-from src.parser import SECParser
-from src.extractor import ItemExtractor
-from src.structure_extractor import StructureExtractor
-from src.index_parser import SECIndexParser
-from utils.logger import ExtractionLogger
-from utils.file_manager import FileManager
 from script.config import ITEMS_10K, ITEMS_10Q
+from src.extractor import ItemExtractor
+from src.parser import SECParser
+from src.structure_extractor import StructureExtractor
 
 
-class ItemXtractor:
-    """Main class for extracting items from SEC EDGAR filings"""
-    
-    def __init__(self, base_dir: str = "sec_filings", log_dir: str = "logs"):
-        """
-        Initialize ItemXtractor
-        
-        Args:
-            base_dir: Base directory for storing SEC filings
-            log_dir: Directory for log files
-        """
-        self.downloader = SECDownloader()
-        self.parser = SECParser()
-        self.extractor = ItemExtractor()
-        self.structure_extractor = StructureExtractor()
-        self.index_parser = SECIndexParser()
-        self.file_manager = FileManager(base_dir)
-        self.logger = ExtractionLogger(log_dir)
-        self.logger_lock = threading.Lock()  # For thread-safe logging
-    
-    def _get_available_items(self, filing_type: str) -> List[str]:
-        """
-        Get list of available items for a filing type
-        
-        Args:
-            filing_type: Type of filing (10-K or 10-Q)
-            
-        Returns:
-            List of available item numbers
-        """
-        if filing_type == "10-K":
-            return list(ITEMS_10K.keys())
-        elif filing_type == "10-Q":
-            return list(ITEMS_10Q.keys())
-        else:
-            return []
-    def _extract_and_save_item(self, item_number: str, html_content: str, 
-                               toc_items: dict, cik_ticker: str, year: str,
-                               filing_type: str, filing_record: dict) -> tuple:
-        """
-        Extract and save a single item (worker method for parallel processing)
-        
-        Args:
-            item_number: Item number to extract
-            html_content: HTML content of the filing
-            toc_items: TOC items dictionary
-            cik_ticker: CIK or ticker symbol
-            year: Filing year
-            filing_type: Type of filing (10-K or 10-Q)
-            filing_record: Filing record for logging
-            
-        Returns:
-            Tuple of (item_number, success, error_message)
-        """
+ITEM_SCOPE_BY_FILING = {
+    "10-K": set(ITEMS_10K.keys()),
+    "10-KA": set(ITEMS_10K.keys()),
+    "10-Q": set(ITEMS_10Q.keys()),
+    "10-QA": set(ITEMS_10Q.keys()),
+}
+
+
+def _item_sort_key(item_num: str) -> tuple[int, str]:
+    """
+    SEC item sort key: numeric part first, then alpha suffix.
+    Examples: 1, 1A, 1B, ..., 9C, 10, 10A
+    """
+    token = (item_num or "").strip().upper()
+    i = 0
+    while i < len(token) and token[i].isdigit():
+        i += 1
+    if i == 0:
+        return (9999, token)
+    return (int(token[:i]), token[i:])
+
+
+def _load_cik_ticker_map(map_path: Path) -> Dict[str, set[str]]:
+    """
+    Load ticker->cik set mapping from annual map CSV.
+    """
+    out: Dict[str, set[str]] = {}
+    if not map_path.exists():
+        return out
+    with map_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            ticker = str(r.get("ticker", "")).strip().upper()
+            cik = str(r.get("cik", "")).strip().zfill(10)
+            if not ticker or not cik:
+                continue
+            out.setdefault(ticker, set()).add(cik)
+    return out
+
+
+def _resolve_ciks_from_args(
+    filing_dir: Path,
+    tickers: Optional[List[str]],
+    ciks: Optional[List[str]],
+) -> set[str]:
+    """
+    Resolve target CIK folders from explicit CIK args and/or ticker args.
+    """
+    target_ciks: set[str] = set()
+    for c in ciks or []:
+        token = c.strip()
+        if token:
+            target_ciks.add(token.zfill(10))
+
+    if tickers:
+        source_map = filing_dir / "_meta" / "cik_ticker_map_edgar.csv"
+        legacy_map = filing_dir / "_meta" / "cik_ticker_map.csv"
+        ticker_map = _load_cik_ticker_map(source_map)
+        if not ticker_map and legacy_map.exists():
+            ticker_map = _load_cik_ticker_map(legacy_map)
+        for t in tickers:
+            sym = t.strip().upper()
+            if not sym:
+                continue
+            matched = ticker_map.get(sym, set())
+            target_ciks.update(matched)
+    return target_ciks
+
+
+def _list_filing_files(
+    filing_dir: Path,
+    target_ciks: set[str],
+    filing_filter: Optional[str],
+) -> List[Path]:
+    html_files: List[Path] = []
+
+    if target_ciks:
+        cik_dirs = [filing_dir / t for t in sorted(target_ciks)]
+    else:
+        cik_dirs = [p for p in filing_dir.iterdir() if p.is_dir()]
+
+    for cik_dir in cik_dirs:
+        if not cik_dir.exists() or not cik_dir.is_dir():
+            continue
+        for year_dir in cik_dir.iterdir():
+            if not year_dir.is_dir():
+                continue
+            for form_dir in year_dir.iterdir():
+                if not form_dir.is_dir():
+                    continue
+                if filing_filter and form_dir.name.upper() != filing_filter.upper():
+                    continue
+                for f in form_dir.iterdir():
+                    if f.is_file() and f.suffix.lower() in {".htm", ".html"}:
+                        html_files.append(f)
+    html_files.sort()
+    return html_files
+
+
+def _parse_path_parts(path: Path, filing_dir: Path) -> Dict[str, str]:
+    rel = path.relative_to(filing_dir)
+    parts = rel.parts
+    # expected: cik/year/filing/file
+    cik = parts[0] if len(parts) >= 1 else ""
+    year = parts[1] if len(parts) >= 2 else ""
+    filing = parts[2] if len(parts) >= 3 else ""
+    return {"cik": cik, "year": year, "filing": filing}
+
+
+def _extract_items_for_file(
+    *,
+    html_path: Path,
+    filing_dir: Path,
+    parser: SECParser,
+    item_extractor: ItemExtractor,
+    overwrite: bool,
+) -> Optional[Path]:
+    base_name = html_path.stem
+    item_out = html_path.with_name(f"{base_name}_item.json")
+    if item_out.exists() and not overwrite:
+        return item_out
+
+    meta = _parse_path_parts(html_path, filing_dir)
+    filing_type = meta["filing"].upper()
+    html_content = html_path.read_text(encoding="utf-8", errors="ignore")
+    toc_items = parser.parse_toc(html_content, filing_type)
+    if not toc_items:
+        return None
+
+    in_scope = ITEM_SCOPE_BY_FILING.get(filing_type)
+    if in_scope:
+        selected = {k: v for k, v in toc_items.items() if k in in_scope}
+    else:
+        selected = {k: v for k, v in toc_items.items()}
+    if not selected:
+        return None
+
+    extracted = {}
+    for item_num in sorted(selected.keys(), key=_item_sort_key):
         try:
-            item_data = self.extractor.extract_item(
-                html_content, item_number, toc_items
-            )
-            
-            # Save to JSON
-            item_path = self.file_manager.get_item_path(
-                cik_ticker, year, filing_type, item_number
-            )
-            self.file_manager.save_item_json(item_path, item_data)
-            
-            # Thread-safe logging
-            with self.logger_lock:
-                self.logger.log_item_extraction(filing_record, item_number, True)
-            
-            # Extract structure automatically
-            try:
-                structure = self.structure_extractor.extract_structure(item_data['html_content'])
-                
-                # Save structure to *_xtr.json
-                xtr_filename = f"{cik_ticker}_{year}_{filing_type}_item{item_number}_xtr.json"
-                xtr_path = os.path.join(
-                    os.path.dirname(item_path),
-                    xtr_filename
-                )
-                
-                xtr_data = {
-                    'ticker': cik_ticker,
-                    'year': year,
-                    'filing_type': filing_type,
-                    'item_number': item_number,
-                    'structure': structure
-                }
-                
-                self.file_manager.save_json(xtr_path, xtr_data)
-                
-                with self.logger_lock:
-                    self.logger.info(
-                        f"Extracted structure for Item {item_number}: {len(structure)} elements"
-                    )
-            except Exception as e:
-                with self.logger_lock:
-                    self.logger.warning(
-                        f"Structure extraction failed for Item {item_number}: {str(e)}"
-                    )
-            
-            return (item_number, True, None)
+            extracted[item_num] = item_extractor.extract_item(html_content, item_num, selected)
         except Exception as e:
-            # Thread-safe logging
-            with self.logger_lock:
-                self.logger.log_item_extraction(
-                    filing_record, item_number, False, error=str(e)
-                )
-            return (item_number, False, str(e))
-    
-    def process_filing(self, cik_ticker: str, year: str, filing_type: str,
-                      items: Optional[List[str]] = None) -> bool:
-        """
-        Process a single SEC filing
-        
-        Args:
-            cik_ticker: CIK number or ticker symbol
-            year: Filing year
-            filing_type: Type of filing (10-K or 10-Q)
-            items: List of item numbers to extract (None = extract all)
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        # Convert ticker to CIK for consistent folder naming
+            extracted[item_num] = {"error": str(e)}
+
+    out = {
+        "cik": meta["cik"],
+        "year": meta["year"],
+        "filing": meta["filing"],
+        "source_file": html_path.name,
+        "toc_items": selected,
+        "items": extracted,
+    }
+    item_out.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    return item_out
+
+
+def _extract_structure_for_file(
+    *,
+    html_path: Path,
+    filing_dir: Path,
+    parser: SECParser,
+    item_extractor: ItemExtractor,
+    structure_extractor: StructureExtractor,
+    overwrite: bool,
+) -> Optional[Path]:
+    base_name = html_path.stem
+    str_out = html_path.with_name(f"{base_name}_str.json")
+    if str_out.exists() and not overwrite:
+        return str_out
+
+    item_out = html_path.with_name(f"{base_name}_item.json")
+    item_payload = None
+    if item_out.exists():
         try:
-            cik = self.downloader.get_cik(cik_ticker)
-            original_identifier = cik_ticker
-        except Exception as e:
-            self.logger.error(f"Failed to resolve {cik_ticker}: {str(e)}")
-            return False
-        
-        # Start logging for this filing (use original identifier for display)
-        filing_record = self.logger.log_filing_start(original_identifier, year, filing_type)
-        self.logger.info(
-            f"Filing worker: {threading.current_thread().name} | {original_identifier} ({cik}) {filing_type} {year}"
+            item_payload = json.loads(item_out.read_text(encoding="utf-8"))
+        except Exception:
+            item_payload = None
+
+    if item_payload is None:
+        item_path = _extract_items_for_file(
+            html_path=html_path,
+            filing_dir=filing_dir,
+            parser=parser,
+            item_extractor=item_extractor,
+            overwrite=overwrite,
         )
-        
+        if not item_path or not item_path.exists():
+            return None
+        item_payload = json.loads(item_path.read_text(encoding="utf-8"))
+
+    structures = {}
+    for item_num, item_data in item_payload.get("items", {}).items():
+        if not isinstance(item_data, dict):
+            continue
+        if "html_content" not in item_data:
+            continue
         try:
-            # Create directory structure using CIK
-            self.file_manager.create_directory_structure(cik, year, filing_type)
-            
-            # Determine file path - try both extensions (use CIK for folder)
-            filing_path_html = self.file_manager.get_filing_path(cik, year, filing_type, 'html')
-            filing_path_htm = self.file_manager.get_filing_path(cik, year, filing_type, 'htm')
-            
-            # Check if file already exists (explicitly checking for FILES, not directories)
-            if self.file_manager.file_exists(filing_path_html):
-                self.logger.info(f"File found: {filing_path_html}")
-                filing_path = filing_path_html
-                html_content = self.file_manager.load_html(filing_path)
-                self.logger.log_download(filing_record, True, skipped=True)
-            elif self.file_manager.file_exists(filing_path_htm):
-                self.logger.info(f"File found: {filing_path_htm}")
-                filing_path = filing_path_htm
-                html_content = self.file_manager.load_html(filing_path)
-                self.logger.log_download(filing_record, True, skipped=True)
-            else:
-                # Files don't exist, so download them
-                self.logger.info(f"Files not found. Will attempt download:")
-                self.logger.info(f"  Looking for: {filing_path_html}")
-                self.logger.info(f"  Or: {filing_path_htm}")
-                
-                # Download the filing
-                try:
-                    html_content, extension, downloaded_cik = self.downloader.download_filing(
-                        cik_ticker, filing_type, year
-                    )
-                    
-                    # Use CIK for file path
-                    filing_path = self.file_manager.get_filing_path(
-                        cik, year, filing_type, extension
-                    )
-                    self.file_manager.save_html(filing_path, html_content)
-                    self.logger.log_download(filing_record, True, skipped=False)
-                except Exception as e:
-                    self.logger.log_download(filing_record, False, error=str(e))
-                    self.logger.log_filing_complete(filing_record)
-                    return False
-            
-            # Parse Table of Contents
-            try:
-                toc_items = self.parser.parse_toc(html_content, filing_type)
-                
-                if toc_items:
-                    self.logger.log_toc_detection(filing_record, True)
-                else:
-                    self.logger.log_toc_detection(filing_record, False)
-                    self.logger.log_filing_complete(filing_record)
-                    return False
-                    
-            except Exception as e:
-                self.logger.log_toc_detection(filing_record, False, error=str(e))
-                self.logger.log_filing_complete(filing_record)
-                return False
-            
-            # Determine which items to extract
-            if items is None:
-                # Extract all items found in TOC
-                items_to_extract = list(toc_items.keys())
-            else:
-                # Only extract requested items that exist in TOC
-                items_to_extract = [item for item in items if item in toc_items]
-            
-            # Extract items sequentially for a single filing (use CIK for folder paths)
-            for item_number in items_to_extract:
-                self._extract_and_save_item(
-                    item_number, html_content, toc_items,
-                    cik, year, filing_type, filing_record
-                )
-            
-            self.logger.log_filing_complete(filing_record)
-            return True
-            
+            structures[item_num] = structure_extractor.extract_structure(item_data["html_content"])
         except Exception as e:
-            filing_record['errors'].append(f"Unexpected error: {str(e)}")
-            self.logger.error(f"Unexpected error processing filing: {str(e)}")
-            self.logger.log_filing_complete(filing_record)
-            return False
-    
-    def extract(self, cik_tickers: Union[str, List[str]], 
-                filing_types: Union[str, List[str]],
-                years: Union[str, int, List[Union[str, int]]],
-                items: Optional[List[str]] = None,
-                max_workers: int = 4) -> str:
-        """
-        Extract items from SEC filings
-        
-        Args:
-            cik_tickers: CIK number(s) or ticker symbol(s)
-            filing_types: Filing type(s) (10-K, 10-Q)
-            years: Year(s) to extract
-            items: List of item numbers to extract (None = extract all)
-            max_workers: Number of worker threads for parallel extraction
-            
-        Returns:
-            JSON report string
-        """
-        # Normalize inputs to lists
-        if isinstance(cik_tickers, str):
-            cik_tickers = [cik_tickers]
-        if isinstance(filing_types, str):
-            filing_types = [filing_types]
-        if isinstance(years, (str, int)):
-            years = [str(years)]
-        else:
-            years = [str(year) for year in years]
-        
-        # Log parameters
-        self.logger.set_parameters(
-            cik_tickers=cik_tickers,
-            filing_types=filing_types,
-            years=years,
-            items=items if items else "all",
-            workers=max_workers
-        )
-        
-        # Build filing tasks
-        tasks = []
-        for cik_ticker in cik_tickers:
-            for filing_type in filing_types:
-                for year in years:
-                    tasks.append((cik_ticker, year, filing_type))
-        
-        # Parallelize across filings only when multiple filings are requested
-        if len(tasks) > 1 and max_workers > 1:
-            with ThreadPoolExecutor(
-                max_workers=max_workers,
-                thread_name_prefix="filing-worker"
-            ) as executor:
-                futures = []
-                for cik_ticker, year, filing_type in tasks:
-                    futures.append(
-                        executor.submit(self.process_filing, cik_ticker, year, filing_type, items)
-                    )
-                for future in futures:
-                    future.result()
-        else:
-            for cik_ticker, year, filing_type in tasks:
-                self.process_filing(cik_ticker, year, filing_type, items)
-        
-        # Generate and return report
-        return self.logger.generate_report()
+            structures[item_num] = {"error": str(e)}
+
+    out = {
+        "cik": item_payload.get("cik"),
+        "year": item_payload.get("year"),
+        "filing": item_payload.get("filing"),
+        "source_file": item_payload.get("source_file"),
+        "structures": structures,
+    }
+    str_out.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    return str_out
 
 
-def main():
-    """Main entry point for command-line usage"""
-    import argparse
-    
-    parser = argparse.ArgumentParser(
-        description='Extract items from SEC EDGAR filings',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Extract all items from Apple's 2023 10-K
-  python script/extractor.py --ticker AAPL --filing 10-K --year 2023
-  
-  # Extract specific items from Microsoft's 2022 and 2023 10-K
-  python script/extractor.py --ticker MSFT --filing 10-K --years 2022 2023 --items 1 1A 7
-  
-  # Extract from multiple companies
-  python script/extractor.py --tickers AAPL MSFT GOOGL --filing 10-K --year 2023
-  
-  # Use CIK instead of ticker
-  python script/extractor.py --cik 0000320193 --filing 10-K --year 2023
-  
-  # Download ALL companies for specific years (no ticker/CIK specified)
-  python script/extractor.py --filing 10-K --years 2023 2024 2025
-        """
-    )
-    
-    # Company identifiers (optional - if not provided, downloads all companies)
-    group = parser.add_mutually_exclusive_group(required=False)
-    group.add_argument('--ticker', '--tickers', nargs='+', dest='tickers',
-                      help='Stock ticker symbol(s) (if omitted, downloads all companies)')
-    group.add_argument('--cik', '--ciks', nargs='+', dest='ciks',
-                      help='CIK number(s) (if omitted, downloads all companies)')
-    
-    # Filing parameters
-    parser.add_argument('--filing', '--filings', nargs='+', dest='filings',
-                       required=True, choices=['10-K', '10-Q'],
-                       help='Filing type(s)')
-    parser.add_argument('--year', '--years', nargs='+', dest='years',
-                       required=True, help='Year(s) to extract')
-    parser.add_argument('--items', nargs='+', dest='items', default=None,
-                       help='Item number(s) to extract (omit to extract all items)')
-    
-    # Directories
-    parser.add_argument('--output-dir', default='sec_filings',
-                       help='Output directory for filings (default: sec_filings)')
-    parser.add_argument('--log-dir', default='logs',
-                       help='Log directory (default: logs)')
-    
-    # Performance
-    parser.add_argument('--workers', type=int, default=4,
-                       help='Number of worker threads for parallel extraction (default: 4)')
-    
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Extract items or structures from downloaded filings.")
+    parser.add_argument("--ticker", nargs="+", dest="tickers", default=None, help="Ticker symbol filter(s).")
+    parser.add_argument("--cik", nargs="+", dest="ciks", default=None, help="CIK folder filter(s).")
+    parser.add_argument("--filing", default=None, help="Filing folder filter (e.g., 10-K).")
+    parser.add_argument("--filing_dir", required=True, help="Root folder where filings are stored.")
+    parser.add_argument("--task", required=True, choices=["item", "structure"], help="Extraction task.")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite extraction outputs.")
     args = parser.parse_args()
-    
-    # Convert years to integers
-    years = [int(y) for y in args.years]
-    
-    # Validate years
-    for year in years:
-        if year < 1995 or year > 2026:
-            parser.error(f"Year {year} must be between 1995 and 2026")
-    
-    # Get company identifiers
-    companies = args.tickers if args.tickers else args.ciks
-    
-    # If no companies specified, download all companies from SEC index
-    if not companies:
-        print("\n" + "="*80)
-        print("WARNING: No tickers or CIKs specified - will download ALL companies!")
-        print("="*80)
-        
-        # Estimate filing count
-        index_parser = SECIndexParser()
-        for filing_type in args.filings:
-            estimated_count, quarters = index_parser.estimate_filing_count(filing_type, years)
-            print(f"\nEstimated {filing_type} filings: ~{estimated_count:,}")
-            print(f"Years: {', '.join(map(str, years))}")
-            print(f"Quarters to check: {quarters}")
-        
-        print("\nThis may take several hours and require significant storage.")
-        print("Rate limiting: 10 requests/second (SEC requirement)")
-        
-        # Confirmation prompt
-        response = input("\nDo you want to continue? (yes/no): ").strip().lower()
-        if response not in ['yes', 'y']:
-            print("Operation cancelled.")
-            sys.exit(0)
-        
-        print("\nFetching company list from SEC EDGAR full-index...")
-        
-        # Get all CIKs for each filing type
-        all_ciks = set()
-        for filing_type in args.filings:
-            print(f"\nScanning {filing_type} filings across {len(years)} year(s)...")
-            ciks = index_parser.get_ciks_for_filing(filing_type, years)
-            all_ciks.update(ciks)
-            print(f"Found {len(ciks)} unique companies filing {filing_type}")
-        
-        companies = sorted(all_ciks)
-        print(f"\nTotal unique companies: {len(companies)}")
-        print("\nStarting extraction...\n")
-    
-    # Create extractor
-    extractor = ItemXtractor(base_dir=args.output_dir, log_dir=args.log_dir)
-    
-    # Run extraction (includes automatic structure extraction)
-    extractor.extract(
-        cik_tickers=companies,
-        filing_types=args.filings,
-        years=years,
-        items=args.items,
-        max_workers=args.workers
-    )
+
+    filing_dir = Path(args.filing_dir)
+    if not filing_dir.exists() or not filing_dir.is_dir():
+        raise FileNotFoundError(f"filing_dir not found: {filing_dir}")
+
+    sec_parser = SECParser()
+    item_extractor = ItemExtractor()
+    structure_extractor = StructureExtractor()
+
+    target_ciks = _resolve_ciks_from_args(filing_dir, args.tickers, args.ciks)
+    if args.tickers and not target_ciks and not args.ciks:
+        print(
+            f"No CIK match found for provided ticker(s) in "
+            f"filing_dir/_meta/cik_ticker_map_edgar.csv"
+        )
+    html_files = _list_filing_files(filing_dir, target_ciks, args.filing)
+    print(f"Found filings: {len(html_files)}")
+    done = 0
+    skipped = 0
+    for i, html_file in enumerate(html_files, start=1):
+        if args.task == "item":
+            out = _extract_items_for_file(
+                html_path=html_file,
+                filing_dir=filing_dir,
+                parser=sec_parser,
+                item_extractor=item_extractor,
+                overwrite=args.overwrite,
+            )
+        else:
+            out = _extract_structure_for_file(
+                html_path=html_file,
+                filing_dir=filing_dir,
+                parser=sec_parser,
+                item_extractor=item_extractor,
+                structure_extractor=structure_extractor,
+                overwrite=args.overwrite,
+            )
+        if out:
+            done += 1
+        else:
+            skipped += 1
+        if i % 100 == 0:
+            print(f"Progress {i}/{len(html_files)} done={done} skipped={skipped}")
+
+    print(f"Completed. done={done} skipped={skipped}")
 
 
 if __name__ == "__main__":
     main()
-
-

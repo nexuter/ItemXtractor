@@ -267,6 +267,18 @@ class ExtractionLogger:
             successful_downloads = sum(1 for f in self.session_data['filings'] if f['downloaded'] or f['skipped_download'])
             toc_found = sum(1 for f in self.session_data['filings'] if f['toc_found'])
             total_items = sum(len(f['items_extracted']) for f in self.session_data['filings'])
+            skipped_no_toc = sum(
+                1 for f in self.session_data['filings']
+                if any("TOC not found near beginning" in err for err in f['errors'])
+            )
+            skipped_no_tagged = sum(
+                1 for f in self.session_data['filings']
+                if any("no tagged anchors for regulated items" in err for err in f['errors'])
+            )
+            out_of_scope_toc_items = sum(
+                1 for f in self.session_data['filings']
+                if any("Out-of-scope TOC items skipped:" in err for err in f['errors'])
+            )
             
             # Save report to CSV file
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -330,6 +342,9 @@ class ExtractionLogger:
                 writer.writerow(['Successful Downloads', successful_downloads])
                 writer.writerow(['TOC Found', toc_found])
                 writer.writerow(['Total Items Extracted', total_items])
+                writer.writerow(['Skipped (No TOC Near Beginning)', skipped_no_toc])
+                writer.writerow(['Skipped (TOC But No Tagged Anchors)', skipped_no_tagged])
+                writer.writerow(['Filings With Out-of-Scope TOC Items', out_of_scope_toc_items])
             
             self.logger.info(f"Execution Report:")
             self.logger.info(f"  Total Duration: {total_duration:.2f}s")
@@ -337,6 +352,9 @@ class ExtractionLogger:
             self.logger.info(f"  Successful Downloads: {successful_downloads}")
             self.logger.info(f"  TOC Found: {toc_found}")
             self.logger.info(f"  Total Items Extracted: {total_items}")
+            self.logger.info(f"  Skipped (No TOC Near Beginning): {skipped_no_toc}")
+            self.logger.info(f"  Skipped (TOC But No Tagged Anchors): {skipped_no_tagged}")
+            self.logger.info(f"  Filings With Out-of-Scope TOC Items: {out_of_scope_toc_items}")
             self.logger.info(f"  Report saved to: {report_file}")
             
             return f"Report saved to: {report_file}"

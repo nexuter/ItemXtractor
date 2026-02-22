@@ -3,8 +3,9 @@ SEC Filing Parser - Detects and parses Table of Contents
 """
 
 import re
-from typing import Dict, List, Optional, Tuple
-from bs4 import BeautifulSoup, Tag, NavigableString
+import unicodedata
+from typing import Dict, Optional, Tuple
+from bs4 import BeautifulSoup, Tag
 
 
 class SECParser:
@@ -22,7 +23,24 @@ class SECParser:
         ]
         self.item_pattern = re.compile(r'item\s+(\d+[A-Za-z]?)\b', re.IGNORECASE)
         self.part_item_pattern = re.compile(r'part\s+[IV]+\s*[–-]\s*item\s+(\d+[A-Za-z]?)\b', re.IGNORECASE)
+        self.part_heading_html_pattern = re.compile(
+            r'>\s*PART(?:\s|&nbsp;)+[IVXLC]+\b',
+            re.IGNORECASE,
+        )
     
+        self.toc_marker_pattern = re.compile(
+            r'table\s+of\s+contents|index\s+to\s+financial\s+statements',
+            re.IGNORECASE,
+        )
+        # TOC should appear near the beginning of the filing.
+        # Inline XBRL filings can prepend very large hidden headers, so we
+        # allow a larger offset while still requiring explicit TOC markers.
+        self.max_toc_marker_offset = 4000000
+        self.toc_region_padding_before = 3000
+        self.toc_region_length = 260000
+        # Fallback window when no explicit TOC marker exists.
+        self.toc_fallback_prefix_length = 800000
+
     def _clean_text(self, text: str) -> str:
         """
         Clean text by removing extra whitespace
@@ -33,6 +51,11 @@ class SECParser:
         Returns:
             Cleaned text
         """
+        # Normalize and remove invisible formatting chars (generic cleanup)
+        text = unicodedata.normalize("NFKC", text)
+        text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+        text = re.sub(r"[\u2018\u2019\u201A\u201B\u2032\u02BC\u00B4]", "'", text)
+        text = re.sub(r"[\u201C\u201D\u201E\u2033]", '"', text)
         # Replace multiple whitespaces with single space
         text = re.sub(r'\s+', ' ', text)
         return text.strip()
@@ -63,13 +86,14 @@ class SECParser:
             
         Returns:
             Item number (e.g., "1", "1A", "7") or None
-        """
-        # Common patterns for items
+        """        # Common patterns for items
         patterns = [
-            r'item\s+(\d+[A-Za-z]?)\b',  # "Item 1A", "Item 7"
-            r'part\s+[IV]+\s*[–-]\s*item\s+(\d+[A-Za-z]?)\b',  # "Part II - Item 1A"
+            r'item\s+(\d{1,2}[A-Za-z]?)\b',  # "Item 1A", "Item 7"
+            r'part\s+[IV]+\s*[–-]\s*item\s+(\d{1,2}[A-Za-z]?)\b',  # "Part II - Item 1A"
+            r'^\s*(\d{1,2}[A-Za-z]?)(?=[A-Za-z])',  # "1Business", "1ARisk Factors"
+            r'^\s*(\d{1,2}[A-Za-z]?)\s*[.:-]\s*[A-Za-z]',  # "1A. Risk Factors", "1: Business"
+            r'^\s*(\d{1,2}[A-Za-z]?)\s+[A-Za-z]',  # "1A Risk Factors" (TOC row variant)
         ]
-        
         text_lower = text.lower()
         for pattern in patterns:
             match = re.search(pattern, text_lower, re.IGNORECASE)
@@ -77,6 +101,31 @@ class SECParser:
                 return match.group(1).upper()
         
         return None
+
+    def _extract_item_numbers(self, text: str) -> list[str]:
+        """
+        Extract all item numbers that appear in a TOC row text.
+        Handles compact rows like:
+        - "PART II. 5. Market for ..."
+        - "1A. Risk Factors"
+        - "Item 7A ..."
+        """
+        found: list[str] = []
+        seen = set()
+        text_lower = text.lower()
+
+        patterns = [
+            r'item\s+(\d{1,2}[a-z]?)\b',
+            r'part\s+[ivx]+\s*[.:-]?\s*(\d{1,2}[a-z]?)\s*[.:]',
+            r'(?<!\d)(\d{1,2}[a-z]?)\s*[.:]\s*[a-z]',
+        ]
+        for pat in patterns:
+            for m in re.finditer(pat, text_lower, re.IGNORECASE):
+                token = m.group(1).upper()
+                if token not in seen:
+                    seen.add(token)
+                    found.append(token)
+        return found
     
     def _find_toc_table(self, soup: BeautifulSoup) -> Optional[Tag]:
         """
@@ -127,6 +176,24 @@ class SECParser:
             return potential_toc_tables[0][1]
         
         return None
+
+    def _get_toc_region_html(self, html_content: str) -> Optional[str]:
+        """
+        Return a beginning-of-filing region around TOC markers.
+
+        The extractor is TOC-driven by design, so we only parse TOC when an
+        explicit TOC marker exists near the start of the filing.
+        """
+        marker_match = self.toc_marker_pattern.search(html_content)
+        if not marker_match:
+            return None
+
+        if marker_match.start() > self.max_toc_marker_offset:
+            return None
+
+        start = max(0, marker_match.start() - self.toc_region_padding_before)
+        end = min(len(html_content), marker_match.start() + self.toc_region_length)
+        return html_content[start:end]
     
     def _parse_toc_from_table(self, table: Tag, filing_type: str) -> Dict[str, Dict[str, str]]:
         """
@@ -146,34 +213,42 @@ class SECParser:
         
         for row in rows:
             row_text = self._clean_text(row.get_text())
-            item_number = self._extract_item_number(row_text)
-            
-            if item_number:
-                # Look for links in this row
+            item_numbers = self._extract_item_numbers(row_text)
+            if not item_numbers:
+                item_number = self._extract_item_number(row_text)
+                if item_number:
+                    item_numbers = [item_number]
+
+            if item_numbers:
                 links = row.find_all('a', href=True)
                 anchor = None
-                
                 for link in links:
                     href = link['href']
-                    # Extract anchor from href
                     if '#' in href:
                         anchor = href.split('#')[1]
                     elif href.startswith('#'):
                         anchor = href[1:]
-                    
                     if anchor:
                         break
-                
-                # If no anchor found, look for nearby anchors or IDs
-                if not anchor:
-                    # Check if row has an id
-                    if row.get('id'):
-                        anchor = row['id']
-                
-                toc_items[item_number] = {
-                    'anchor': anchor,
-                    'title': self._clean_item_title(row_text)
-                }
+
+                if not anchor and row.get('id'):
+                    anchor = row['id']
+
+                title = self._clean_item_title(row_text)
+                if len(title) > 240:
+                    title = ""
+
+                for item_number in item_numbers:
+                    existing = toc_items.get(item_number)
+                    # Never overwrite anchored entry with unanchored entry.
+                    if existing and existing.get('anchor') and not anchor:
+                        continue
+                    if existing and existing.get('anchor') and anchor:
+                        continue
+                    toc_items[item_number] = {
+                        'anchor': anchor,
+                        'title': title if title else f'Item {item_number}'
+                    }
         
         return toc_items
     
@@ -235,6 +310,49 @@ class SECParser:
                     }
         
         return toc_items
+
+    def _parse_toc_from_links(self, soup: BeautifulSoup) -> Dict[str, Dict[str, str]]:
+        """
+        Parse TOC from anchor links (common in inline-XBRL filings where TOC is
+        represented as linked item labels instead of a clean table).
+        """
+        toc_items: Dict[str, Dict[str, str]] = {}
+        links = soup.find_all("a", href=True)
+        for link in links:
+            link_text = self._clean_text(link.get_text(" ", strip=True))
+
+            href = link.get("href", "").strip()
+            if not href:
+                continue
+
+            anchor = None
+            if href.startswith("#"):
+                anchor = href[1:]
+            elif "#" in href:
+                anchor = href.split("#", 1)[1]
+            if not anchor:
+                continue
+
+            # Prefer richer title from closest row/div, fallback to link text.
+            container = link.find_parent(["tr", "div", "p"])
+            context_text = self._clean_text(container.get_text(" ", strip=True)) if container else link_text
+            title_text = context_text if 0 < len(context_text) <= 250 else link_text
+            item_numbers = self._extract_item_numbers(context_text) if context_text else []
+            if not item_numbers:
+                one = self._extract_item_number(link_text) if link_text else None
+                item_numbers = [one] if one else []
+            if not item_numbers:
+                continue
+
+            for item_number in item_numbers:
+                existing = toc_items.get(item_number)
+                if existing and existing.get("anchor"):
+                    continue
+                toc_items[item_number] = {
+                    "anchor": anchor,
+                    "title": self._clean_item_title(title_text),
+                }
+        return toc_items
     
     def parse_toc(self, html_content: str, filing_type: str) -> Optional[Dict[str, Dict[str, str]]]:
         """
@@ -252,7 +370,14 @@ class SECParser:
                 ...
             }
         """
-        soup = BeautifulSoup(html_content, 'html.parser')
+        toc_region_html = self._get_toc_region_html(html_content)
+        has_explicit_marker = toc_region_html is not None
+        if not toc_region_html:
+            # Some filings have a valid TOC table but no literal TOC marker text.
+            # In that case, only attempt table-based detection in the beginning region.
+            toc_region_html = html_content[:self.toc_fallback_prefix_length]
+
+        soup = BeautifulSoup(toc_region_html, 'html.parser')
         
         # Try to find TOC table first
         toc_table = self._find_toc_table(soup)
@@ -260,8 +385,45 @@ class SECParser:
         if toc_table:
             toc_items = self._parse_toc_from_table(toc_table, filing_type)
             if toc_items and len(toc_items) >= 2:
-                return toc_items
-        
+                # Enrich table-derived TOC with link-derived anchors/titles.
+                linked_items = self._parse_toc_from_links(soup)
+                for k, v in linked_items.items():
+                    if k not in toc_items:
+                        toc_items[k] = v
+                    elif not toc_items[k].get("anchor") and v.get("anchor"):
+                        toc_items[k]["anchor"] = v.get("anchor")
+                        if v.get("title"):
+                            toc_items[k]["title"] = v.get("title")
+
+                anchored_count = sum(1 for v in toc_items.values() if v.get("anchor"))
+                if anchored_count >= 2:
+                    return toc_items
+
+        # Try parsing linked TOC entries from the TOC region.
+        toc_items = self._parse_toc_from_links(soup)
+        anchored_count = sum(1 for v in toc_items.values() if v.get("anchor"))
+        if toc_items and len(toc_items) >= 5 and anchored_count >= 5:
+            return toc_items
+ 
+        # Some filings place index/TOC links outside the immediate TOC marker
+        # region (e.g., repeated page headers with linked ITEM anchors).
+        # Fallback to a larger prefix scan, then full-document link scan.
+        broad_soup = BeautifulSoup(html_content[: self.toc_fallback_prefix_length], "html.parser")
+        toc_items = self._parse_toc_from_links(broad_soup)
+        anchored_count = sum(1 for v in toc_items.values() if v.get("anchor"))
+        if toc_items and len(toc_items) >= 5 and anchored_count >= 5:
+            return toc_items
+
+        full_soup = BeautifulSoup(html_content, "html.parser")
+        toc_items = self._parse_toc_from_links(full_soup)
+        anchored_count = sum(1 for v in toc_items.values() if v.get("anchor"))
+        if toc_items and len(toc_items) >= 5 and anchored_count >= 5:
+            return toc_items
+
+        # If no explicit marker exists, do not perform loose structure fallback.
+        if not has_explicit_marker:
+            return None
+
         # Fallback: analyze document structure (but limit search)
         toc_items = self._find_toc_from_structure(soup, filing_type)
         
@@ -297,6 +459,74 @@ class SECParser:
             return (0, item)
         
         sorted_items = sorted(toc_items.keys(), key=item_sort_key)
+
+        def _anchor_start(anchor_val: Optional[str], search_from: int = 0) -> int:
+            if not anchor_val:
+                return -1
+            anchor_pattern = rf'(?:id|name)\s*=\s*[\'\"]{re.escape(anchor_val)}[\'\"]'
+            m = re.search(anchor_pattern, html_content[search_from:], re.IGNORECASE)
+            if not m:
+                return -1
+            pos = search_from + m.start()
+            tag_open = html_content.rfind('<', 0, pos)
+            return tag_open if tag_open != -1 else pos
+
+        def _find_item_heading_start(item_num: str, lo: int, hi: int) -> int:
+            """
+            Fallback start finder for items that have no TOC anchor.
+            Searches ITEM heading tokens in a bounded window and chooses the
+            last match (typically the real section heading before next item).
+            """
+            if hi <= lo:
+                return -1
+            window = html_content[lo:hi]
+            # Allow tags/non-breaking spaces between ITEM and item number.
+            item_pat = re.compile(
+                rf'ITEM(?:\s|&nbsp;|&#160;|<[^>]+>){{0,20}}{re.escape(item_num)}(?:\b|[.:])',
+                re.IGNORECASE,
+            )
+            matches = list(item_pat.finditer(window))
+            if not matches:
+                return -1
+            m = matches[-1]
+            pos = lo + m.start()
+            tag_open = html_content.rfind('<', lo, pos)
+            return tag_open if tag_open != -1 else pos
+
+        def _find_next_heading_among(items: list[str], lo: int, hi: int) -> int:
+            """
+            Find earliest heading occurrence among candidate item numbers in [lo, hi).
+            """
+            best = -1
+            for candidate_item in items:
+                pos = _find_item_heading_start(candidate_item, lo, hi)
+                if pos == -1:
+                    continue
+                if best == -1 or pos < best:
+                    best = pos
+            return best
+
+        def trim_end_at_part_heading(start_pos: int, end_pos: int) -> int:
+            """
+            If a PART heading appears between current and next TOC anchor,
+            trim the current item so PART headers are excluded.
+            """
+            if end_pos <= start_pos:
+                return end_pos
+            segment = html_content[start_pos:end_pos]
+            match = self.part_heading_html_pattern.search(segment)
+            if not match:
+                return end_pos
+
+            candidate = start_pos + match.start()
+            # Guardrails to avoid truncating on incidental in-text mentions.
+            if (candidate - start_pos) < 200:
+                return end_pos
+            if (end_pos - candidate) > 12000:
+                return end_pos
+
+            tag_open = html_content.rfind('<', start_pos, candidate)
+            return tag_open if tag_open != -1 else candidate
         
         for i, item_num in enumerate(sorted_items):
             anchor = toc_items[item_num].get('anchor')
@@ -314,16 +544,25 @@ class SECParser:
             # Find the anchor id/name attribute, then locate the opening tag
             start_pos = -1
             if anchor:
-                anchor_pattern = rf'(?:id|name)\s*=\s*[\'\"]{re.escape(anchor)}[\'\"]'
-                anchor_match = re.search(anchor_pattern, html_content, re.IGNORECASE)
-                if anchor_match:
-                    # Go backwards from anchor to find the opening <
-                    anchor_start = anchor_match.start()
-                    tag_open = html_content.rfind('<', 0, anchor_start)
-                    if tag_open != -1:
-                        start_pos = tag_open  # Start at the opening < tag itself
-                    else:
-                        start_pos = anchor_start
+                start_pos = _anchor_start(anchor, 0)
+            else:
+                # Fallback when TOC captured item number/title but no anchor.
+                prev_anchor_pos = -1
+                for j in range(i - 1, -1, -1):
+                    prev_anchor = toc_items[sorted_items[j]].get('anchor')
+                    prev_anchor_pos = _anchor_start(prev_anchor, 0)
+                    if prev_anchor_pos != -1:
+                        break
+                next_anchor_pos = len(html_content)
+                for j in range(i + 1, len(sorted_items)):
+                    next_anchor = toc_items[sorted_items[j]].get('anchor')
+                    npos = _anchor_start(next_anchor, 0)
+                    if npos != -1:
+                        next_anchor_pos = npos
+                        break
+                lo = 0 if prev_anchor_pos == -1 else prev_anchor_pos
+                hi = next_anchor_pos
+                start_pos = _find_item_heading_start(item_num, lo, hi)
 
             if start_pos != -1:
                 # Find end position (next item or end of document)
@@ -344,6 +583,21 @@ class SECParser:
                                 end_pos = tag_open
                             else:
                                 end_pos = anchor_pos_in_full
+                    else:
+                        # Next item has no anchor: fallback to next heading search.
+                        # Limit search to before the next anchored item after current.
+                        hi = len(html_content)
+                        for j in range(i + 1, len(sorted_items)):
+                            anc = toc_items[sorted_items[j]].get('anchor')
+                            anc_pos = _anchor_start(anc, 0)
+                            if anc_pos != -1:
+                                hi = anc_pos
+                                break
+                        candidate_items = sorted_items[i + 1 :]
+                        heading_pos = _find_next_heading_among(candidate_items, start_pos + 1, hi)
+                        if heading_pos != -1:
+                            end_pos = heading_pos
+                    end_pos = trim_end_at_part_heading(start_pos, end_pos)
 
                 else:
                     # For the last item, search for end-marker IDs as boundary
@@ -363,3 +617,5 @@ class SECParser:
                 positions[item_num] = (start_pos, end_pos)
         
         return positions
+
+
