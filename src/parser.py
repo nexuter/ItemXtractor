@@ -109,10 +109,25 @@ class SECParser:
         - "PART II. 5. Market for ..."
         - "1A. Risk Factors"
         - "Item 7A ..."
+        - "Items 1 and 2. Business and Properties"
         """
         found: list[str] = []
         seen = set()
         text_lower = text.lower()
+
+        # Handle explicit combined plural rows first (non-standard but seen in filings),
+        # e.g. "Items 1 and 2. Business and Properties".
+        combo = re.search(
+            r'\bitems?\s+(\d{1,2}[a-z]?)\s*(?:[.:])?\s+and\s+(\d{1,2}[a-z]?)\b',
+            text_lower,
+            re.IGNORECASE,
+        )
+        if combo:
+            for g in (combo.group(1), combo.group(2)):
+                token = g.upper()
+                if token not in seen:
+                    seen.add(token)
+                    found.append(token)
 
         patterns = [
             r'item\s+(\d{1,2}[a-z]?)\b',
@@ -448,17 +463,10 @@ class SECParser:
         soup = BeautifulSoup(html_content, 'html.parser')
         positions = {}
         
-        # Sort items properly (1, 1A, 1B, 2, 3, etc.)
-        def item_sort_key(item: str) -> Tuple[int, str]:
-            """Sort key for item numbers"""
-            match = re.match(r'(\d+)([A-Z]?)', item)
-            if match:
-                num = int(match.group(1))
-                letter = match.group(2) or ''
-                return (num, letter)
-            return (0, item)
-        
-        sorted_items = sorted(toc_items.keys(), key=item_sort_key)
+        # Preserve TOC appearance order. This is important for combined rows
+        # like "Items 1 and 2 ..." where both items share one anchor and should
+        # have the same section boundary before the next TOC item (e.g., Item 1A).
+        sorted_items = list(toc_items.keys())
 
         def _anchor_start(anchor_val: Optional[str], search_from: int = 0) -> int:
             if not anchor_val:
@@ -569,10 +577,24 @@ class SECParser:
                 end_pos = len(html_content)
 
                 if i < len(sorted_items) - 1:
-                    next_item = sorted_items[i + 1]
-                    next_anchor = toc_items[next_item].get('anchor')
+                    # If adjacent TOC items share the same anchor (combined section),
+                    # skip to the next distinct item for boundary detection.
+                    next_idx = i + 1
+                    while (
+                        next_idx < len(sorted_items)
+                        and anchor
+                        and toc_items[sorted_items[next_idx]].get('anchor') == anchor
+                    ):
+                        next_idx += 1
 
-                    if next_anchor:
+                    if next_idx >= len(sorted_items):
+                        next_item = None
+                        next_anchor = None
+                    else:
+                        next_item = sorted_items[next_idx]
+                        next_anchor = toc_items[next_item].get('anchor')
+
+                    if next_item and next_anchor:
                         next_anchor_pattern = rf'(?:id|name)\s*=\s*[\'\"]{re.escape(next_anchor)}[\'\"]'
                         next_anchor_match = re.search(next_anchor_pattern, html_content[start_pos:], re.IGNORECASE)
                         if next_anchor_match:
@@ -583,20 +605,33 @@ class SECParser:
                                 end_pos = tag_open
                             else:
                                 end_pos = anchor_pos_in_full
-                    else:
+                    elif next_item:
                         # Next item has no anchor: fallback to next heading search.
                         # Limit search to before the next anchored item after current.
                         hi = len(html_content)
-                        for j in range(i + 1, len(sorted_items)):
+                        for j in range(next_idx, len(sorted_items)):
                             anc = toc_items[sorted_items[j]].get('anchor')
                             anc_pos = _anchor_start(anc, 0)
                             if anc_pos != -1:
                                 hi = anc_pos
                                 break
-                        candidate_items = sorted_items[i + 1 :]
+                        candidate_items = sorted_items[next_idx:]
                         heading_pos = _find_next_heading_among(candidate_items, start_pos + 1, hi)
                         if heading_pos != -1:
                             end_pos = heading_pos
+                    else:
+                        # No next distinct item found (all remaining share same anchor).
+                        # Fall through to end-marker boundary like the last item case.
+                        for compiled_pattern in self.end_marker_patterns:
+                            marker_match = compiled_pattern.search(html_content[start_pos:])
+                            if marker_match:
+                                marker_pos_in_full = start_pos + marker_match.start()
+                                tag_open = html_content.rfind('<', 0, marker_pos_in_full)
+                                if tag_open != -1:
+                                    end_pos = tag_open
+                                else:
+                                    end_pos = marker_pos_in_full
+                                break
                     end_pos = trim_end_at_part_heading(start_pos, end_pos)
 
                 else:

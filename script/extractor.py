@@ -12,6 +12,7 @@ import argparse
 import csv
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -245,6 +246,12 @@ def main() -> None:
     parser.add_argument("--filing_dir", required=True, help="Root folder where filings are stored.")
     parser.add_argument("--task", required=True, choices=["item", "structure"], help="Extraction task.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite extraction outputs.")
+    parser.add_argument(
+        "--progress_every",
+        type=int,
+        default=25,
+        help="Print progress every N filings (default: 25).",
+    )
     args = parser.parse_args()
 
     filing_dir = Path(args.filing_dir)
@@ -265,6 +272,8 @@ def main() -> None:
     print(f"Found filings: {len(html_files)}")
     done = 0
     skipped = 0
+    started_at = time.time()
+    total = len(html_files)
     for i, html_file in enumerate(html_files, start=1):
         if args.task == "item":
             out = _extract_items_for_file(
@@ -287,8 +296,16 @@ def main() -> None:
             done += 1
         else:
             skipped += 1
-        if i % 100 == 0:
-            print(f"Progress {i}/{len(html_files)} done={done} skipped={skipped}")
+        if total > 0 and (i == 1 or i % max(args.progress_every, 1) == 0 or i == total):
+            elapsed = time.time() - started_at
+            rate = i / elapsed if elapsed > 0 else 0.0
+            remaining = (total - i) / rate if rate > 0 else 0.0
+            print(
+                f"Progress {i}/{total} ({(i/total)*100:.1f}%) "
+                f"done={done} skipped={skipped} "
+                f"elapsed={elapsed/60:.1f}m eta={remaining/60:.1f}m",
+                flush=True,
+            )
 
     print(f"Completed. done={done} skipped={skipped}")
 
