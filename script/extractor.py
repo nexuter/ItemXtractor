@@ -99,6 +99,7 @@ def _list_filing_files(
     filing_dir: Path,
     target_ciks: set[str],
     filing_filter: Optional[str],
+    year_filter: Optional[set[str]],
 ) -> List[Path]:
     html_files: List[Path] = []
 
@@ -112,6 +113,8 @@ def _list_filing_files(
             continue
         for year_dir in cik_dir.iterdir():
             if not year_dir.is_dir():
+                continue
+            if year_filter and year_dir.name not in year_filter:
                 continue
             for form_dir in year_dir.iterdir():
                 if not form_dir.is_dir():
@@ -243,6 +246,7 @@ def main() -> None:
     parser.add_argument("--ticker", nargs="+", dest="tickers", default=None, help="Ticker symbol filter(s).")
     parser.add_argument("--cik", nargs="+", dest="ciks", default=None, help="CIK folder filter(s).")
     parser.add_argument("--filing", default=None, help="Filing folder filter (e.g., 10-K).")
+    parser.add_argument("--year", nargs="+", dest="years", default=None, help="Year folder filter(s), e.g. 2023 2024.")
     parser.add_argument("--filing_dir", required=True, help="Root folder where filings are stored.")
     parser.add_argument("--task", required=True, choices=["item", "structure"], help="Extraction task.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite extraction outputs.")
@@ -263,12 +267,13 @@ def main() -> None:
     structure_extractor = StructureExtractor()
 
     target_ciks = _resolve_ciks_from_args(filing_dir, args.tickers, args.ciks)
+    year_filter = {str(y).strip() for y in (args.years or []) if str(y).strip()}
     if args.tickers and not target_ciks and not args.ciks:
         print(
             f"No CIK match found for provided ticker(s) in "
             f"filing_dir/_meta/cik_ticker_map_edgar.csv"
         )
-    html_files = _list_filing_files(filing_dir, target_ciks, args.filing)
+    html_files = _list_filing_files(filing_dir, target_ciks, args.filing, year_filter if year_filter else None)
     print(f"Found filings: {len(html_files)}")
     done = 0
     skipped = 0

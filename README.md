@@ -97,9 +97,11 @@ usage: extractor.py [-h]
                     [--ticker TICKERS [TICKERS ...]]
                     [--cik CIKS [CIKS ...]]
                     [--filing FILING]
+                    [--year YEARS [YEARS ...]]
                     --filing_dir FILING_DIR
                     --task {item,structure}
                     [--overwrite]
+                    [--progress_every PROGRESS_EVERY]
 ```
 
 ### Examples
@@ -116,6 +118,12 @@ Extract structures from existing item outputs:
 python script/extractor.py --filing_dir sec_filings --filing 10-K --task structure
 ```
 
+Year filter:
+
+```bash
+python script/extractor.py --filing_dir sec_filings --filing 10-K --year 2024 --task item
+```
+
 Filter by CIK/ticker:
 
 ```bash
@@ -123,11 +131,32 @@ python script/extractor.py --filing_dir sec_filings --filing 10-K --task item --
 python script/extractor.py --filing_dir sec_filings --filing 10-K --task item --ticker AAPL
 ```
 
+Show frequent progress updates with elapsed/ETA:
+
+```bash
+python script/extractor.py --filing_dir sec_filings --filing 10-K --task item --overwrite --progress_every 25
+```
+
 ## Notes
 
 - Item extraction is TOC-driven. If TOC is not detected, extraction for that filing is skipped.
 - Extraction only keeps regulated item scope from `script/config.py`.
 - Existing output files are skipped unless `--overwrite` is set.
+- `--task structure` reuses existing `*_item.json`. It only runs item extraction first if `*_item.json` is missing.
+- Combined TOC rows like `Items 1 and 2` are supported. When both map to one section anchor, item boundaries are aligned so Item 1 and Item 2 represent the same combined section.
+- Terminal marker rule: cut when `None.` / `Not applicable.` appears first after item title; do not cut when it appears later in item text.
+
+## Validation
+
+Boundary-focused validator:
+
+```bash
+python tests/validate_extraction.py --filing_dir sec_filings --filing 10-K --year 2024 --limit 20
+```
+
+This compares extracted `text_content` against source HTML segments using first/last word windows and writes:
+- `logs/extraction_validation_<timestamp>.csv`
+- `stats/extraction_validation_<timestamp>.md`
 
 ## Technical Docs
 

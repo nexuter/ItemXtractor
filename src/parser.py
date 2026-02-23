@@ -348,11 +348,37 @@ class SECParser:
             if not anchor:
                 continue
 
-            # Prefer richer title from closest row/div, fallback to link text.
-            container = link.find_parent(["tr", "div", "p"])
-            context_text = self._clean_text(container.get_text(" ", strip=True)) if container else link_text
+            # Prefer richer row/cell context over small inline wrappers.
+            # Example: "ITEM 6. [Reserved] 42" often has anchors only on
+            # "[Reserved]" and page number, while the item token is in sibling cell text.
+            context_text = ""
+            item_numbers: list[str] = []
+            chosen_context = None
+            for tag_name in ["tr", "td", "li", "p", "div"]:
+                candidate = link.find_parent(tag_name)
+                if not candidate:
+                    continue
+                candidate_text = self._clean_text(candidate.get_text(" ", strip=True))
+                if not candidate_text:
+                    continue
+                nums = self._extract_item_numbers(candidate_text)
+                if not nums:
+                    one_ctx = self._extract_item_number(candidate_text)
+                    nums = [one_ctx] if one_ctx else []
+                if nums:
+                    context_text = candidate_text
+                    item_numbers = nums
+                    chosen_context = candidate
+                    break
+
+            if not context_text:
+                # Fallback to nearest acceptable container text, then link text.
+                container = link.find_parent(["tr", "td", "li", "p", "div"])
+                context_text = self._clean_text(container.get_text(" ", strip=True)) if container else link_text
+
             title_text = context_text if 0 < len(context_text) <= 250 else link_text
-            item_numbers = self._extract_item_numbers(context_text) if context_text else []
+            if not item_numbers:
+                item_numbers = self._extract_item_numbers(context_text) if context_text else []
             if not item_numbers:
                 one = self._extract_item_number(link_text) if link_text else None
                 item_numbers = [one] if one else []
@@ -394,6 +420,16 @@ class SECParser:
 
         soup = BeautifulSoup(toc_region_html, 'html.parser')
         
+        def _merge_missing(base: Dict[str, Dict[str, str]], extra: Dict[str, Dict[str, str]]) -> Dict[str, Dict[str, str]]:
+            for k, v in extra.items():
+                if k not in base:
+                    base[k] = v
+                elif (not base[k].get("anchor")) and v.get("anchor"):
+                    base[k]["anchor"] = v.get("anchor")
+                    if v.get("title"):
+                        base[k]["title"] = v.get("title")
+            return base
+
         # Try to find TOC table first
         toc_table = self._find_toc_table(soup)
         
@@ -412,12 +448,20 @@ class SECParser:
 
                 anchored_count = sum(1 for v in toc_items.values() if v.get("anchor"))
                 if anchored_count >= 2:
+                    # Enrich once with a broader prefix scan to recover edge rows
+                    # not present in the immediate TOC marker region.
+                    broad_soup = BeautifulSoup(html_content[: self.toc_fallback_prefix_length], "html.parser")
+                    broad_items = self._parse_toc_from_links(broad_soup)
+                    toc_items = _merge_missing(toc_items, broad_items)
                     return toc_items
 
         # Try parsing linked TOC entries from the TOC region.
         toc_items = self._parse_toc_from_links(soup)
         anchored_count = sum(1 for v in toc_items.values() if v.get("anchor"))
         if toc_items and len(toc_items) >= 5 and anchored_count >= 5:
+            broad_soup = BeautifulSoup(html_content[: self.toc_fallback_prefix_length], "html.parser")
+            broad_items = self._parse_toc_from_links(broad_soup)
+            toc_items = _merge_missing(toc_items, broad_items)
             return toc_items
  
         # Some filings place index/TOC links outside the immediate TOC marker
@@ -615,10 +659,16 @@ class SECParser:
                             if anc_pos != -1:
                                 hi = anc_pos
                                 break
-                        candidate_items = sorted_items[next_idx:]
-                        heading_pos = _find_next_heading_among(candidate_items, start_pos + 1, hi)
+                        # Use only the immediate next TOC item for boundary.
+                        # Scanning all future items can truncate early on
+                        # in-text references (e.g., "see Item 8") inside current item.
+                        heading_pos = _find_item_heading_start(next_item, start_pos + 1, hi)
                         if heading_pos != -1:
                             end_pos = heading_pos
+                        elif hi != len(html_content):
+                            # If we cannot find an unanchored next-item heading,
+                            # fall back to the next anchored item boundary.
+                            end_pos = hi
                     else:
                         # No next distinct item found (all remaining share same anchor).
                         # Fall through to end-marker boundary like the last item case.

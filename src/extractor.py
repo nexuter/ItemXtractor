@@ -99,20 +99,30 @@ class ItemExtractor:
         out = re.sub(r'^\s*\d{1,3}\s+(?=ITEM\s+\d+[A-Z]?\b)', '', out, flags=re.IGNORECASE)
 
         # Trim any preamble before first explicit item heading for this item
-        item_head = re.search(rf'ITEM\s+{re.escape(item_number)}(?:\b|[.:])\s*', out, flags=re.IGNORECASE)
+        item_head = re.search(rf'ITEM\s+{re.escape(item_number)}\s*[.:]?\s*', out, flags=re.IGNORECASE)
         if item_head:
             out = out[item_head.start():]
 
-        # If 'Not applicable' appears early, treat it as terminal statement.
-        # This avoids leakage of page/footer or optional appendix text.
-        na_match = re.search(r'\bNot\s+applicable\b(?:\s*[.:;])?', out, flags=re.IGNORECASE)
-        if na_match and na_match.start() <= 350:
-            out = out[:na_match.end()]
-
-        # If 'None' appears early as a terminal statement, stop there as well.
-        none_match = re.search(r'\bNone\b(?:\s*[.:;])?', out, flags=re.IGNORECASE)
-        if none_match and none_match.start() <= 350:
-            out = out[:none_match.end()]
+        # Two-rule policy:
+        # 1) Cut only when "Not applicable." or "None." appears first after item title.
+        # 2) Do not cut when marker appears later in the item text.
+        # "appears first" is implemented as:
+        # - marker found in early window right after "ITEM X"
+        # - no sentence-ending punctuation before marker in that early window
+        heading = re.search(
+            rf"ITEM\s+{re.escape(item_number)}\s*[.:]?\s*",
+            out,
+            flags=re.IGNORECASE,
+        )
+        if heading:
+            after = out[heading.end() : heading.end() + 420]
+            marker = re.search(r"\b(?:Not\s+applicable|None)\b\.", after, flags=re.IGNORECASE)
+            if marker:
+                prefix = after[: marker.start()]
+                # If there is no earlier sentence-ending punctuation,
+                # treat marker as first terminal sentence and cut there.
+                if not re.search(r"[.!?;:]", prefix):
+                    out = out[: heading.end() + marker.end()].strip()
 
         # Drop trailing standalone page number tokens.
         out = re.sub(r'\s+\d{1,3}\s*$', '', out)

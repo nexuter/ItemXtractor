@@ -35,6 +35,10 @@ Extractor uses TOC as the primary anchor source because:
 6. Save JSON.
 7. If `--task structure`, parse heading/body hierarchy from item HTML.
 
+When task is `structure`:
+- If `*_item.json` exists, extractor reuses it.
+- If missing, extractor creates `*_item.json` first, then builds `*_str.json`.
+
 ## TOC Parsing Strategy
 
 Parser combines multiple methods:
@@ -43,7 +47,8 @@ Parser combines multiple methods:
 - guarded structural fallback
 
 Important behavior:
-- Explicit TOC markers are required to proceed.
+- TOC is still required for extraction.
+- Parser first uses explicit TOC marker regions, and can also recover TOC from beginning-region tables/links when marker text is missing but TOC structure is clear.
 - Link-based parsing can recover anchors when table rows are non-standard.
 - Anchored entries are not overwritten by weaker unanchored rows.
 
@@ -53,6 +58,8 @@ Primary boundary logic:
 - Start at current item anchor (or fallback heading when anchor missing).
 - End at next item anchor.
 - If next anchor is missing, use next item heading fallback within bounded range.
+- Preserve TOC appearance order for boundaries (not only numeric item sort), which is critical for combined rows like `Items 1 and 2`.
+- If adjacent TOC items share the same anchor, they are treated as one combined section boundary; both items end at the next distinct item.
 
 This prevents item spillover to filing end.
 
@@ -67,11 +74,11 @@ Extractor applies generic cleanup rules to avoid overfitting a single filing:
 
 ## Terminal-Statement Trimming
 
-For items whose valid content is effectively empty, extractor trims early when terminal statements appear near the beginning:
-- `Not applicable...`
-- `None...`
+Current policy (simple and deterministic):
+- Cut when `Not applicable.` or `None.` appears first after the item title.
+- Do not cut when `Not applicable.` or `None.` appears later in the item text.
 
-This avoids accidental inclusion of trailing page/footer/index sections.
+This keeps behavior predictable across many filings and avoids case-by-case overfitting.
 
 ## Real Cases Found and Resolved
 
@@ -118,14 +125,26 @@ Symptoms:
 Fix:
 - Generic normalization and artifact filtering in text extraction pipeline.
 
-### Case 6: Terminal statements with trailing junk
+### Case 6: Terminal statements and trailing junk
 
 Symptoms:
 - `Item 16 ... Not applicable. 94 ...`
 - `Item 16 ... None. 125 ... INDEX TO EXHIBITS ...`
 
 Fix:
-- Early terminal trimming after item heading context.
+- Apply first-marker rule (`None.` / `Not applicable.`) and trim at marker when it appears first after item heading.
+- Preserve text when marker appears later (for example `None of ...` in the middle).
+
+### Case 7: Combined rows (`Items 1 and 2`) and boundary mismatch
+
+Symptoms:
+- One filing captured both item numbers, another captured only item `2`.
+- Item `2` could spill into following sections (`1A`, `1B`, `1C`) when boundaries were computed in numeric order.
+
+Fix:
+- TOC number parsing explicitly supports plural combined rows (`Items X and Y`).
+- Boundary computation uses TOC appearance order.
+- Same-anchor sibling items are grouped for boundary purposes so Item 1 and Item 2 are aligned to the same section range.
 
 ## Output Format
 
@@ -163,6 +182,32 @@ Company filter:
 ```bash
 python script/extractor.py --filing_dir sec_filings --filing 10-K --task item --cik 0000003499
 ```
+
+Year filter:
+
+```bash
+python script/extractor.py --filing_dir sec_filings --filing 10-K --year 2024 --task item
+```
+
+Progress frequency:
+
+```bash
+python script/extractor.py --filing_dir sec_filings --filing 10-K --task item --progress_every 25
+```
+
+## Validation Workflow
+
+Boundary-focused validation script:
+
+```bash
+python tests/validate_extraction.py --filing_dir sec_filings --filing 10-K --year 2024 --limit 1000
+```
+
+Outputs:
+- `logs/extraction_validation_<timestamp>.csv`
+- `stats/extraction_validation_<timestamp>.md`
+
+Validation compares extracted text boundaries to source HTML segments using first/last token windows with normalization and ordered/overlap matching to reduce layout-based false positives.
 
 ## What Extractor Does Not Do
 
