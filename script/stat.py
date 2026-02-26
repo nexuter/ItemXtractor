@@ -1,16 +1,13 @@
 """
-Extraction performance report generator for current pipeline layout.
+Extraction performance report generator.
 
-Scans filing folders:
-  {cik}/{year}/{filing}/{cik}_{year}_{filing}.htm|html
-  {cik}_{year}_{filing}_item.json
-  {cik}_{year}_{filing}_str.json
+Produces per-year markdown reports under stats/:
+  extraction_stat_{year}_{timestamp}.md
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import re
 import sys
@@ -62,7 +59,7 @@ def _walk_structure(nodes: List[dict]) -> Tuple[int, int, int]:
     return heading_count, body_count, max_depth
 
 
-def _iter_filing_htmls(root: Path):
+def _iter_filing_htmls(root: Path, years: Optional[Set[int]] = None):
     # root/{cik}/{year}/{filing}/{base}.htm|html
     for cik_dir in root.iterdir():
         if not cik_dir.is_dir() or not cik_dir.name.isdigit():
@@ -73,6 +70,8 @@ def _iter_filing_htmls(root: Path):
                 continue
             year = _safe_int_year(year_dir.name)
             if year is None:
+                continue
+            if years and year not in years:
                 continue
             for filing_dir in year_dir.iterdir():
                 if not filing_dir.is_dir():
@@ -92,13 +91,12 @@ def _load_json(path: Path) -> Optional[dict]:
         return None
 
 
-def build_report(folder: Path) -> Tuple[Path, Path, Path, Path]:
+def build_report(folder: Path, years: Optional[Set[int]] = None) -> List[Path]:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    logs_dir = Path("logs")
     stats_dir = Path("stats")
-    logs_dir.mkdir(parents=True, exist_ok=True)
     stats_dir.mkdir(parents=True, exist_ok=True)
 
+    # Year-level aggregates
     year_stats = defaultdict(lambda: {
         "filings_total": 0,
         "filings_toc_found": 0,
@@ -126,8 +124,12 @@ def build_report(folder: Path) -> Tuple[Path, Path, Path, Path]:
     # Track extra items (outside expected set)
     extra_items = defaultdict(set)  # (year, filing) -> set[item]
 
+    # Detailed issue tracking
+    item_errors = defaultdict(list)  # year -> list of (cik, filing, item, error)
+    missing_expected = defaultdict(list)  # year -> list of (cik, filing, missing_items)
+    missing_toc = defaultdict(list)  # year -> list of (cik, filing, html_name)
+
     # Structure stats per item
-    # (year, filing, item) -> dict of aggregations
     structure_stats = defaultdict(lambda: {
         "count": 0,
         "head_sum": 0,
@@ -144,8 +146,9 @@ def build_report(folder: Path) -> Tuple[Path, Path, Path, Path]:
         "ratio_max": None,
     })
 
-    html_list = list(_iter_filing_htmls(folder))
+    html_list = list(_iter_filing_htmls(folder, years=years))
     total_html = len(html_list)
+
     for idx, (cik, year, filing, html_path) in enumerate(html_list, start=1):
         y = year_stats[year]
         y["filings_total"] += 1
@@ -162,6 +165,7 @@ def build_report(folder: Path) -> Tuple[Path, Path, Path, Path]:
         if not item_payload:
             y["item_json_missing"] += 1
             y["filings_toc_missing"] += 1
+            missing_toc[year].append((cik, filing, html_path.name))
             continue
 
         y["item_json_present"] += 1
@@ -175,19 +179,24 @@ def build_report(folder: Path) -> Tuple[Path, Path, Path, Path]:
         y["toc_anchors_sum"] += sum(1 for v in toc_items.values() if isinstance(v, dict) and v.get("anchor"))
         y["extracted_items_sum"] += len(items)
 
-        had_error = any(isinstance(v, dict) and "error" in v for v in items.values())
-        if had_error:
-            y["filings_with_item_errors"] += 1
-
         expected = EXPECTED_ITEMS_BY_FILING.get(filing, set())
         extracted_item_nums = {k for k in items.keys()}
         if extracted_item_nums:
             y["filings_with_any_extracted_items"] += 1
 
+        had_error = False
+        for item_num, payload in items.items():
+            if isinstance(payload, dict) and payload.get("error"):
+                had_error = True
+                item_errors[year].append((cik, filing, item_num, str(payload.get("error"))))
+        if had_error:
+            y["filings_with_item_errors"] += 1
+
         if expected:
-            missing_expected = expected - extracted_item_nums
-            if missing_expected:
+            missing = sorted(expected - extracted_item_nums)
+            if missing:
                 y["filings_missing_expected_items"] += 1
+                missing_expected[year].append((cik, filing, ", ".join(missing)))
 
         for item_num in extracted_item_nums:
             item_coverage[(year, filing, item_num)] += 1
@@ -227,162 +236,26 @@ def build_report(folder: Path) -> Tuple[Path, Path, Path, Path]:
             pct = (idx / total_html * 100.0) if total_html else 100.0
             print(f"[stat] processed {idx}/{total_html} filings ({pct:.1f}%)")
 
-    # Year summary CSV
-    year_csv = logs_dir / f"extraction_performance_{stamp}.csv"
-    with year_csv.open("w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(
-            f,
-            fieldnames=[
-                "year",
-                "filings_total",
-                "filings_toc_found",
-                "filings_toc_missing",
-                "filings_with_any_extracted_items",
-                "item_json_present",
-                "item_json_missing",
-                "str_json_present",
-                "avg_toc_items",
-                "avg_toc_anchors",
-                "avg_extracted_items",
-                "filings_with_item_errors",
-                "filings_missing_expected_items",
-            ],
-        )
-        w.writeheader()
-        for year in sorted(year_stats.keys()):
-            y = year_stats[year]
-            denom = max(y["item_json_present"], 1)
-            w.writerow(
-                {
-                    "year": year,
-                    "filings_total": y["filings_total"],
-                    "filings_toc_found": y["filings_toc_found"],
-                    "filings_toc_missing": y["filings_toc_missing"],
-                    "filings_with_any_extracted_items": y["filings_with_any_extracted_items"],
-                    "item_json_present": y["item_json_present"],
-                    "item_json_missing": y["item_json_missing"],
-                    "str_json_present": y["str_json_present"],
-                    "avg_toc_items": round(y["toc_items_sum"] / denom, 2),
-                    "avg_toc_anchors": round(y["toc_anchors_sum"] / denom, 2),
-                    "avg_extracted_items": round(y["extracted_items_sum"] / denom, 2),
-                    "filings_with_item_errors": y["filings_with_item_errors"],
-                    "filings_missing_expected_items": y["filings_missing_expected_items"],
-                }
-            )
-
-    # Item coverage CSV (with lengths)
-    item_csv = logs_dir / f"item_coverage_{stamp}.csv"
-    with item_csv.open("w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(
-            f,
-            fieldnames=[
-                "year",
-                "filing",
-                "item",
-                "filings_with_item",
-                "filings_total",
-                "filings_toc_found",
-                "x_out_of_y",
-                "coverage_pct_total",
-                "coverage_pct_toc_found",
-                "avg_words",
-                "min_words",
-                "max_words",
-            ],
-        )
-        w.writeheader()
-        for (year, filing, item), count in sorted(item_coverage.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])):
-            total = filing_counts.get((year, filing), 0)
-            toc_found = filing_toc_found_counts.get((year, filing), 0)
-            pct_total = (count / total * 100.0) if total else 0.0
-            pct_toc = (count / toc_found * 100.0) if toc_found else 0.0
-            agg = item_lengths[(year, filing, item)]
-            avg_words = round(agg[1] / max(agg[0], 1), 2)
-            w.writerow(
-                {
-                    "year": year,
-                    "filing": filing,
-                    "item": item,
-                    "filings_with_item": count,
-                    "filings_total": total,
-                    "filings_toc_found": toc_found,
-                    "x_out_of_y": f"{count}/{toc_found}",
-                    "coverage_pct_total": round(pct_total, 2),
-                    "coverage_pct_toc_found": round(pct_toc, 2),
-                    "avg_words": avg_words,
-                    "min_words": agg[2] or 0,
-                    "max_words": agg[3] or 0,
-                }
-            )
-
-    # Structure stats CSV
-    structure_csv = logs_dir / f"structure_stats_{stamp}.csv"
-    with structure_csv.open("w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(
-            f,
-            fieldnames=[
-                "year",
-                "filing",
-                "item",
-                "filings_with_structure",
-                "avg_headings",
-                "min_headings",
-                "max_headings",
-                "avg_bodies",
-                "min_bodies",
-                "max_bodies",
-                "avg_depth",
-                "min_depth",
-                "max_depth",
-                "avg_heading_body_ratio",
-                "min_heading_body_ratio",
-                "max_heading_body_ratio",
-            ],
-        )
-        w.writeheader()
-        for (year, filing, item), s in sorted(structure_stats.items()):
-            count = max(s["count"], 1)
-            w.writerow(
-                {
-                    "year": year,
-                    "filing": filing,
-                    "item": item,
-                    "filings_with_structure": s["count"],
-                    "avg_headings": round(s["head_sum"] / count, 2),
-                    "min_headings": s["head_min"] or 0,
-                    "max_headings": s["head_max"] or 0,
-                    "avg_bodies": round(s["body_sum"] / count, 2),
-                    "min_bodies": s["body_min"] or 0,
-                    "max_bodies": s["body_max"] or 0,
-                    "avg_depth": round(s["depth_sum"] / count, 2),
-                    "min_depth": s["depth_min"] or 0,
-                    "max_depth": s["depth_max"] or 0,
-                    "avg_heading_body_ratio": round(s["ratio_sum"] / count, 2) if s["count"] else 0.0,
-                    "min_heading_body_ratio": round(s["ratio_min"], 2) if s["ratio_min"] is not None else 0.0,
-                    "max_heading_body_ratio": round(s["ratio_max"], 2) if s["ratio_max"] is not None else 0.0,
-                }
-            )
-
-    # Markdown report
-    md_path = stats_dir / f"extraction_performance_{stamp}.md"
-    lines: List[str] = []
-    lines.append("# Extraction Performance Report")
-    lines.append("")
-    lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append(f"Source folder: `{folder}`")
-    lines.append("")
-
-    lines.append("## 1. Item Extraction Summary")
-    lines.append("")
-    lines.append("| Year | Filings | TOC Found | TOC Missing | Any Items Extracted | Item JSON | Missing Item JSON | Structure JSON | Avg TOC Items | Avg TOC Anchors | Avg Extracted Items | Filings with Item Errors | Filings Missing Expected Items |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
-
+    # Build per-year markdowns
+    outputs: List[Path] = []
     for year in sorted(year_stats.keys()):
         y = year_stats[year]
         denom = max(y["item_json_present"], 1)
+        md_path = stats_dir / f"extraction_stat_{year}_{stamp}.md"
+        lines: List[str] = []
+        lines.append("# Extraction Performance Report")
+        lines.append("")
+        lines.append(f"Year: {year}")
+        lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"Source folder: `{folder}`")
+        lines.append("")
+
+        lines.append("## 1. Item Extraction Summary")
+        lines.append("")
+        lines.append("| Filings | TOC Found | TOC Missing | Any Items Extracted | Item JSON | Missing Item JSON | Structure JSON | Avg TOC Items | Avg TOC Anchors | Avg Extracted Items | Filings with Item Errors | Filings Missing Expected Items |")
+        lines.append("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
         lines.append(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {:.2f} | {:.2f} | {:.2f} | {} | {} |".format(
-                year,
+            "| {} | {} | {} | {} | {} | {} | {} | {:.2f} | {:.2f} | {:.2f} | {} | {} |".format(
                 y["filings_total"],
                 y["filings_toc_found"],
                 y["filings_toc_missing"],
@@ -398,59 +271,121 @@ def build_report(folder: Path) -> Tuple[Path, Path, Path, Path]:
             )
         )
 
-    lines.append("")
-    lines.append("## 2. Item Coverage and Lengths")
-    lines.append("")
-    lines.append("Coverage is shown in two ways:")
-    lines.append("- `X out of Y (TOC)` where Y is filings with TOC found for that year+filing.")
-    lines.append("- `Coverage % (Total)` where denominator is all filings for that year+filing.")
-    lines.append("")
+        lines.append("")
+        lines.append("## 2. Item Coverage and Lengths")
+        lines.append("")
+        lines.append("| Filing | Item | X out of Y (TOC) | Coverage % (TOC Found) | Coverage % (Total) | Avg Words | Min Words | Max Words |")
+        lines.append("|---|---|---|---:|---:|---:|---:|---:|")
+        for (yy, filing, item), count in sorted(item_coverage.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])):
+            if yy != year:
+                continue
+            total = filing_counts.get((yy, filing), 0)
+            toc_found = filing_toc_found_counts.get((yy, filing), 0)
+            pct_total = (count / total * 100.0) if total else 0.0
+            pct_toc = (count / toc_found * 100.0) if toc_found else 0.0
+            agg = item_lengths[(yy, filing, item)]
+            avg_words = round(agg[1] / max(agg[0], 1), 2)
+            lines.append(
+                f"| {filing} | {item} | {count}/{toc_found} | {pct_toc:.2f} | {pct_total:.2f} | {avg_words} | {agg[2] or 0} | {agg[3] or 0} |"
+            )
 
-    lines.append("See CSV for per-item coverage and word-length stats:")
-    lines.append(f"- `{item_csv}`")
+        lines.append("")
+        lines.append("## 3. Structure Extraction Stats")
+        lines.append("")
+        lines.append("| Filing | Item | Filings | Avg Headings | Min | Max | Avg Bodies | Min | Max | Avg Depth | Min | Max | Avg H/B | Min | Max |")
+        lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        for (yy, filing, item), s in sorted(structure_stats.items()):
+            if yy != year:
+                continue
+            count = max(s["count"], 1)
+            lines.append(
+                "| {} | {} | {} | {:.2f} | {} | {} | {:.2f} | {} | {} | {:.2f} | {} | {} | {:.2f} | {} | {} |".format(
+                    filing,
+                    item,
+                    s["count"],
+                    s["head_sum"] / count,
+                    s["head_min"] or 0,
+                    s["head_max"] or 0,
+                    s["body_sum"] / count,
+                    s["body_min"] or 0,
+                    s["body_max"] or 0,
+                    s["depth_sum"] / count,
+                    s["depth_min"] or 0,
+                    s["depth_max"] or 0,
+                    (s["ratio_sum"] / count) if s["count"] else 0.0,
+                    round(s["ratio_min"], 2) if s["ratio_min"] is not None else 0.0,
+                    round(s["ratio_max"], 2) if s["ratio_max"] is not None else 0.0,
+                )
+            )
 
-    lines.append("")
-    lines.append("## 3. Structure Extraction Summary")
-    lines.append("")
-    lines.append("See CSV for per-item structure stats (headings/bodies/depth/ratios):")
-    lines.append(f"- `{structure_csv}`")
+        lines.append("")
+        lines.append("## 4. Filings with Item Errors")
+        lines.append("")
+        lines.append("These are per-item extraction errors recorded in `*_item.json`.")
+        if not item_errors.get(year):
+            lines.append("None.")
+        else:
+            lines.append("| CIK | Filing | Item | Error |")
+            lines.append("|---|---|---|---|")
+            for cik, filing, item_num, err in item_errors[year]:
+                lines.append(f"| {cik} | {filing} | {item_num} | {err} |")
 
-    lines.append("")
-    lines.append("## 4. Extra Items (Outside Regulated Scope)")
-    lines.append("")
-    if not extra_items:
-        lines.append("No extra items found.")
-    else:
-        lines.append("| Year | Filing | Extra Items |")
-        lines.append("|---|---|---|")
-        for (year, filing), items in sorted(extra_items.items(), key=lambda x: (x[0][0], x[0][1])):
-            lines.append(f"| {year} | {filing} | {', '.join(sorted(items))} |")
+        lines.append("")
+        lines.append("## 5. Filings Missing Expected Items")
+        lines.append("")
+        lines.append("Expected item list is from `script/config.py`.")
+        if not missing_expected.get(year):
+            lines.append("None.")
+        else:
+            lines.append("| CIK | Filing | Missing Items |")
+            lines.append("|---|---|---|")
+            for cik, filing, missing in missing_expected[year]:
+                lines.append(f"| {cik} | {filing} | {missing} |")
 
-    lines.append("")
-    lines.append("## 5. Artifacts")
-    lines.append("")
-    lines.append(f"- Year summary CSV: `{year_csv}`")
-    lines.append(f"- Item coverage CSV: `{item_csv}`")
-    lines.append(f"- Structure stats CSV: `{structure_csv}`")
+        lines.append("")
+        lines.append("## 6. Filings Missing TOC")
+        lines.append("")
+        if not missing_toc.get(year):
+            lines.append("None.")
+        else:
+            lines.append("| CIK | Filing | HTML |")
+            lines.append("|---|---|---|")
+            for cik, filing, html_name in missing_toc[year]:
+                lines.append(f"| {cik} | {filing} | {html_name} |")
 
-    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return md_path, year_csv, item_csv, structure_csv
+        lines.append("")
+        lines.append("## 7. Extra Items (Outside Regulated Scope)")
+        lines.append("")
+        if not extra_items:
+            lines.append("No extra items found.")
+        else:
+            lines.append("| Filing | Extra Items |")
+            lines.append("|---|---|")
+            for (yy, filing), items in sorted(extra_items.items(), key=lambda x: (x[0][0], x[0][1])):
+                if yy != year:
+                    continue
+                lines.append(f"| {filing} | {', '.join(sorted(items))} |")
+
+        md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        outputs.append(md_path)
+
+    return outputs
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate extraction performance report for current pipeline outputs.")
     parser.add_argument("--folder", default="sec_filings", help="Root filings folder (default: sec_filings)")
+    parser.add_argument("--year", nargs="+", type=int, help="Optional year(s) to scope the report")
     args = parser.parse_args()
 
     folder = Path(args.folder)
     if not folder.exists() or not folder.is_dir():
         raise FileNotFoundError(f"Folder not found: {folder}")
 
-    md_path, year_csv, item_csv, structure_csv = build_report(folder)
-    print(f"Report generated: {md_path}")
-    print(f"Year summary CSV: {year_csv}")
-    print(f"Item coverage CSV: {item_csv}")
-    print(f"Structure stats CSV: {structure_csv}")
+    years = set(args.year) if args.year else None
+    outputs = build_report(folder, years=years)
+    for path in outputs:
+        print(f"Report generated: {path}")
     return 0
 
 

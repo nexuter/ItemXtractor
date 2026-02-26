@@ -165,16 +165,16 @@ Contains hierarchical heading/body blocks parsed from item HTML.
 
 ### Stats / Reporting
 
-`script/stat.py` scans a filings folder and generates:
+`script/stat.py` scans a filings folder and generates per-year markdown reports:
 - Yearly TOC/item coverage stats
 - Per-item length stats (avg/min/max word count)
 - Structure stats (avg/min/max headings, bodies, depth, and heading/body ratio)
+- Filings with item errors and per-item error detail
+- Filings missing expected items
+- Filings missing TOC (CIK list)
 
 Artifacts:
-- `stats/extraction_performance_<timestamp>.md`
-- `logs/extraction_performance_<timestamp>.csv`
-- `logs/item_coverage_<timestamp>.csv`
-- `logs/structure_stats_<timestamp>.csv`
+- `stats/extraction_stat_<year>_<timestamp>.md`
 
 ## Command Usage
 

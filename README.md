@@ -148,24 +148,25 @@ python script/extractor.py --filing_dir sec_filings --filing 10-K --task item --
 
 ## Stats / Reporting
 
-`script/stat.py` generates a multi-part report across all filings in a folder.
+`script/stat.py` generates per-year markdown reports (no CSV outputs).
 
 Outputs:
-- `stats/extraction_performance_<timestamp>.md`
-- `logs/extraction_performance_<timestamp>.csv`
-- `logs/item_coverage_<timestamp>.csv`
-- `logs/structure_stats_<timestamp>.csv`
+- `stats/extraction_stat_<year>_<timestamp>.md`
 
 Run:
 
 ```bash
 python script/stat.py --folder sec_filings
+python script/stat.py --folder sec_filings --year 2024
 ```
 
-The report includes:
+Each report includes:
 - Yearly TOC/item coverage stats
 - Per-item coverage and length stats (avg/min/max word count)
 - Structure stats (headings/bodies/depth/ratios)
+- Filings with item errors (and error detail)
+- Filings missing expected items (with missing list)
+- Filings missing TOC (CIK list)
 
 ## Validation
 
