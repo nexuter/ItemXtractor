@@ -1,105 +1,49 @@
 # Structure Extraction Enhancement Summary
 
 ## Overview
-Enhanced the structure extraction feature to automatically detect and build hierarchical (nested) heading-body pair structures from within extracted SEC filing items.
+Structure extraction builds hierarchical heading/body trees from each item’s HTML.
 
-## Key Improvements
+## Current Behavior
 
 ### 1. **Hierarchical Detection**
-- **Level 1 headings**: Bold styled divs (font-weight:700)
-- **Level 2 headings**: Italic styled divs (font-style:italic) nested under level 1 headings
-- **Automatic nesting**: Content with level 2 headings are placed as "children" under their parent level 1 headings
+- Headings are detected using multiple signals (bold/italic/underline/center, title‑case, item tokens).
+- Level assignment is heuristic and allows deeper nesting when style indicates hierarchy.
+- TOC‑derived item title becomes the layer‑1 root when available.
 
 ### 2. **Smart Structure Building**
-The new algorithm:
-1. Collects all elements (headings and body content)
-2. Identifies heading types by their styling (bold vs italic)
-3. Builds hierarchical relationships using a stack-based approach
-4. Properly nests child headings under parents
-5. Associates body content with the correct heading level
+The algorithm:
+1. Collects block elements in document order
+2. Classifies headings vs body using style + text heuristics
+3. Builds a nested tree using a stack
+4. Attaches body text to the nearest active heading
 
-### 3. **Output Format**
-Each element now includes:
-- `type`: Element type (heading, body, simple_text)
-- `layer`: Hierarchy level (1 = top level, 2 = nested, etc.)
-- `heading`: The heading text (null for body-only elements)
-- `body`: The body content associated with this heading
-- `children`: Array of nested child headings
+### 3. **Noise Filtering**
+The extractor filters common non‑content lines:
+- `Table of Contents`
+- `PART I/II/III/IV`
+- `TABLE 2.1:` style labels
+- page numbers
 
-### 4. **Real-World Example: AAPL 2022 Item 1**
-Before enhancement (flat structure):
-```
-- Item 1. Business (body: empty)
-- Company Background (body: description)
-- Products (body: ALL product descriptions mixed together)
-- iPhone (body: empty) ← Lost connection to Products
-- Mac (body: empty) ← Lost connection to Products
-- iPad (body: empty) ← Lost connection to Products
-- Services (body: ALL service descriptions mixed)
-- Advertising (body: empty) ← Lost connection to Services
-...
-```
+### 4. **Split Bold Lead‑ins**
+Some paragraphs begin with a bold phrase followed by normal text:
+- Example: `Contracts. In March 2023, ...`
+These are split into a heading (`Contracts`) and a body (rest of sentence).
 
-After enhancement (nested structure):
-```
-- Item 1. Business
-  └─ Company Background (body: description)
-  └─ Products (body: empty)
-     ├─ iPhone (body: iPhone description)
-     ├─ Mac (body: Mac description)
-     ├─ iPad (body: iPad description)
-     └─ Wearables, Home and Accessories (body: description)
-  └─ Services (body: empty)
-     ├─ Advertising (body: description)
-     ├─ AppleCare (body: description)
-     ├─ Cloud Services (body: description)
-     ├─ Digital Content (body: description)
-     └─ Payment Services (body: description)
-  └─ Human Capital (body: description)
-     ├─ Workplace Practices and Policies (body: description)
-     ├─ Compensation and Benefits (body: description)
-     ├─ Inclusion and Diversity (body: description)
-     ├─ Engagement (body: description)
-     └─ Health and Safety (body: description)
-```
-
-## Technical Changes
-
-### Modified Files
-- `src/structure_extractor.py`: Complete refactor of extraction logic
-  - `_collect_elements()`: New method to gather all elements with their properties
-  - `_get_heading_info()`: New method to detect headings by styling
-  - `_is_body_content()`: New method to identify body paragraphs
-  - `_build_hierarchy()`: New method to create nested structure from flat list
-  - Removed old flat extraction methods
-
-- `script/extractor.py`: No changes (integration remains the same)
-- `README.md`: Added documentation section on structure extraction
+### 5. **Bullet‑Only Bold**
+Bulleted lines often have a bold bullet but normal text. These are treated as body, not headings.
 
 ## Usage
 
 Extract structures from already extracted items:
 ```bash
-python script/extractor.py --ticker AAPL --filing 10-K --year 2022 --extract-structure
+python script/extractor.py --filing_dir sec_filings --filing 10-K --task structure
 ```
 
-This creates files like: `AAPL_2022_10-K_item1_xtr.json` with nested structure.
+Outputs:
+```
+{cik}_{year}_{filing}_str.json
+```
 
-## Benefits
-
-1. **Better Understanding**: Clear hierarchy makes it easy to navigate complex item structures
-2. **Parent-Child Relationships**: Code can easily traverse from child to parent and vice versa
-3. **Downstream Analysis**: NLP/ML applications can better understand document structure
-4. **Data Quality**: No lost context when parsing structured items
-5. **Scalability**: Works with any nesting depth (though filings typically use 1-2 levels)
-
-## Testing
-
-Tested on:
-- ✅ AAPL 2022 Item 1: 12 root elements with 12 nested children
-- ✅ AAPL 2022 Item 16: Simple text item (no nesting)
-- ✅ MSFT 2022 Item 1: Simple text item (no nested structure)
-
-All working correctly with proper structure detection.
-
-
+## Notes
+- Structure depth is typically 2–3 in most filings.
+- Output quality depends on the item HTML and styling consistency.

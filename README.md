@@ -146,6 +146,27 @@ python script/extractor.py --filing_dir sec_filings --filing 10-K --task item --
 - Combined TOC rows like `Items 1 and 2` are supported. When both map to one section anchor, item boundaries are aligned so Item 1 and Item 2 represent the same combined section.
 - Terminal marker rule: cut when `None.` / `Not applicable.` appears first after item title; do not cut when it appears later in item text.
 
+## Stats / Reporting
+
+`script/stat.py` generates a multi-part report across all filings in a folder.
+
+Outputs:
+- `stats/extraction_performance_<timestamp>.md`
+- `logs/extraction_performance_<timestamp>.csv`
+- `logs/item_coverage_<timestamp>.csv`
+- `logs/structure_stats_<timestamp>.csv`
+
+Run:
+
+```bash
+python script/stat.py --folder sec_filings
+```
+
+The report includes:
+- Yearly TOC/item coverage stats
+- Per-item coverage and length stats (avg/min/max word count)
+- Structure stats (headings/bodies/depth/ratios)
+
 ## Validation
 
 Boundary-focused validator:

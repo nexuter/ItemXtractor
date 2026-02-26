@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime
@@ -35,6 +36,30 @@ EXPECTED_ITEMS_BY_FILING: Dict[str, Set[str]] = {
 
 def _safe_int_year(text: str) -> Optional[int]:
     return int(text) if text.isdigit() else None
+
+
+def _word_count(text: str) -> int:
+    return len([w for w in re.split(r"\s+", (text or "").strip()) if w])
+
+
+def _walk_structure(nodes: List[dict]) -> Tuple[int, int, int]:
+    """
+    Return (heading_count, body_count, max_depth).
+    max_depth is the max layer value encountered for heading nodes.
+    """
+    heading_count = 0
+    body_count = 0
+    max_depth = 0
+    stack = list(nodes or [])
+    while stack:
+        node = stack.pop()
+        if node.get("type") == "heading":
+            heading_count += 1
+            max_depth = max(max_depth, int(node.get("layer") or 0))
+        if (node.get("body") or "").strip():
+            body_count += 1
+        stack.extend(node.get("children") or [])
+    return heading_count, body_count, max_depth
 
 
 def _iter_filing_htmls(root: Path):
@@ -67,7 +92,7 @@ def _load_json(path: Path) -> Optional[dict]:
         return None
 
 
-def build_report(folder: Path) -> Tuple[Path, Path, Path]:
+def build_report(folder: Path) -> Tuple[Path, Path, Path, Path]:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     logs_dir = Path("logs")
     stats_dir = Path("stats")
@@ -91,6 +116,8 @@ def build_report(folder: Path) -> Tuple[Path, Path, Path]:
 
     # (year, filing, item) -> count of filings where item was extracted
     item_coverage = defaultdict(int)
+    # (year, filing, item) -> [count, sum_words, min_words, max_words]
+    item_lengths = defaultdict(lambda: [0, 0, None, None])
     # (year, filing) -> filings count
     filing_counts = defaultdict(int)
     # (year, filing) -> filings where TOC was found (proxy: item json exists)
@@ -99,7 +126,27 @@ def build_report(folder: Path) -> Tuple[Path, Path, Path]:
     # Track extra items (outside expected set)
     extra_items = defaultdict(set)  # (year, filing) -> set[item]
 
-    for cik, year, filing, html_path in _iter_filing_htmls(folder):
+    # Structure stats per item
+    # (year, filing, item) -> dict of aggregations
+    structure_stats = defaultdict(lambda: {
+        "count": 0,
+        "head_sum": 0,
+        "head_min": None,
+        "head_max": None,
+        "body_sum": 0,
+        "body_min": None,
+        "body_max": None,
+        "depth_sum": 0,
+        "depth_min": None,
+        "depth_max": None,
+        "ratio_sum": 0.0,
+        "ratio_min": None,
+        "ratio_max": None,
+    })
+
+    html_list = list(_iter_filing_htmls(folder))
+    total_html = len(html_list)
+    for idx, (cik, year, filing, html_path) in enumerate(html_list, start=1):
         y = year_stats[year]
         y["filings_total"] += 1
         filing_counts[(year, filing)] += 1
@@ -144,8 +191,41 @@ def build_report(folder: Path) -> Tuple[Path, Path, Path]:
 
         for item_num in extracted_item_nums:
             item_coverage[(year, filing, item_num)] += 1
+            text_content = (items.get(item_num) or {}).get("text_content") or ""
+            words = _word_count(text_content)
+            agg = item_lengths[(year, filing, item_num)]
+            agg[0] += 1
+            agg[1] += words
+            agg[2] = words if agg[2] is None else min(agg[2], words)
+            agg[3] = words if agg[3] is None else max(agg[3], words)
             if expected and item_num not in expected:
                 extra_items[(year, filing)].add(item_num)
+
+        str_payload = _load_json(str_path)
+        if str_payload:
+            structures = (str_payload.get("structures") or {})
+            for item_num, nodes in structures.items():
+                head_cnt, body_cnt, depth = _walk_structure(nodes or [])
+                ratio = (head_cnt / body_cnt) if body_cnt else float("inf")
+                s = structure_stats[(year, filing, item_num)]
+                s["count"] += 1
+                s["head_sum"] += head_cnt
+                s["head_min"] = head_cnt if s["head_min"] is None else min(s["head_min"], head_cnt)
+                s["head_max"] = head_cnt if s["head_max"] is None else max(s["head_max"], head_cnt)
+                s["body_sum"] += body_cnt
+                s["body_min"] = body_cnt if s["body_min"] is None else min(s["body_min"], body_cnt)
+                s["body_max"] = body_cnt if s["body_max"] is None else max(s["body_max"], body_cnt)
+                s["depth_sum"] += depth
+                s["depth_min"] = depth if s["depth_min"] is None else min(s["depth_min"], depth)
+                s["depth_max"] = depth if s["depth_max"] is None else max(s["depth_max"], depth)
+                s["ratio_sum"] += ratio if ratio != float("inf") else 0.0
+                if ratio != float("inf"):
+                    s["ratio_min"] = ratio if s["ratio_min"] is None else min(s["ratio_min"], ratio)
+                    s["ratio_max"] = ratio if s["ratio_max"] is None else max(s["ratio_max"], ratio)
+
+        if idx % 100 == 0 or idx == total_html:
+            pct = (idx / total_html * 100.0) if total_html else 100.0
+            print(f"[stat] processed {idx}/{total_html} filings ({pct:.1f}%)")
 
     # Year summary CSV
     year_csv = logs_dir / f"extraction_performance_{stamp}.csv"
@@ -190,7 +270,7 @@ def build_report(folder: Path) -> Tuple[Path, Path, Path]:
                 }
             )
 
-    # Item coverage CSV
+    # Item coverage CSV (with lengths)
     item_csv = logs_dir / f"item_coverage_{stamp}.csv"
     with item_csv.open("w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(
@@ -205,6 +285,9 @@ def build_report(folder: Path) -> Tuple[Path, Path, Path]:
                 "x_out_of_y",
                 "coverage_pct_total",
                 "coverage_pct_toc_found",
+                "avg_words",
+                "min_words",
+                "max_words",
             ],
         )
         w.writeheader()
@@ -213,6 +296,8 @@ def build_report(folder: Path) -> Tuple[Path, Path, Path]:
             toc_found = filing_toc_found_counts.get((year, filing), 0)
             pct_total = (count / total * 100.0) if total else 0.0
             pct_toc = (count / toc_found * 100.0) if toc_found else 0.0
+            agg = item_lengths[(year, filing, item)]
+            avg_words = round(agg[1] / max(agg[0], 1), 2)
             w.writerow(
                 {
                     "year": year,
@@ -224,19 +309,70 @@ def build_report(folder: Path) -> Tuple[Path, Path, Path]:
                     "x_out_of_y": f"{count}/{toc_found}",
                     "coverage_pct_total": round(pct_total, 2),
                     "coverage_pct_toc_found": round(pct_toc, 2),
+                    "avg_words": avg_words,
+                    "min_words": agg[2] or 0,
+                    "max_words": agg[3] or 0,
+                }
+            )
+
+    # Structure stats CSV
+    structure_csv = logs_dir / f"structure_stats_{stamp}.csv"
+    with structure_csv.open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(
+            f,
+            fieldnames=[
+                "year",
+                "filing",
+                "item",
+                "filings_with_structure",
+                "avg_headings",
+                "min_headings",
+                "max_headings",
+                "avg_bodies",
+                "min_bodies",
+                "max_bodies",
+                "avg_depth",
+                "min_depth",
+                "max_depth",
+                "avg_heading_body_ratio",
+                "min_heading_body_ratio",
+                "max_heading_body_ratio",
+            ],
+        )
+        w.writeheader()
+        for (year, filing, item), s in sorted(structure_stats.items()):
+            count = max(s["count"], 1)
+            w.writerow(
+                {
+                    "year": year,
+                    "filing": filing,
+                    "item": item,
+                    "filings_with_structure": s["count"],
+                    "avg_headings": round(s["head_sum"] / count, 2),
+                    "min_headings": s["head_min"] or 0,
+                    "max_headings": s["head_max"] or 0,
+                    "avg_bodies": round(s["body_sum"] / count, 2),
+                    "min_bodies": s["body_min"] or 0,
+                    "max_bodies": s["body_max"] or 0,
+                    "avg_depth": round(s["depth_sum"] / count, 2),
+                    "min_depth": s["depth_min"] or 0,
+                    "max_depth": s["depth_max"] or 0,
+                    "avg_heading_body_ratio": round(s["ratio_sum"] / count, 2) if s["count"] else 0.0,
+                    "min_heading_body_ratio": round(s["ratio_min"], 2) if s["ratio_min"] is not None else 0.0,
+                    "max_heading_body_ratio": round(s["ratio_max"], 2) if s["ratio_max"] is not None else 0.0,
                 }
             )
 
     # Markdown report
     md_path = stats_dir / f"extraction_performance_{stamp}.md"
     lines: List[str] = []
-    lines.append("# Item Extraction Performance Report")
+    lines.append("# Extraction Performance Report")
     lines.append("")
     lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"Source folder: `{folder}`")
     lines.append("")
 
-    lines.append("## 1. Yearly Summary")
+    lines.append("## 1. Item Extraction Summary")
     lines.append("")
     lines.append("| Year | Filings | TOC Found | TOC Missing | Any Items Extracted | Item JSON | Missing Item JSON | Structure JSON | Avg TOC Items | Avg TOC Anchors | Avg Extracted Items | Filings with Item Errors | Filings Missing Expected Items |")
     lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
@@ -263,28 +399,24 @@ def build_report(folder: Path) -> Tuple[Path, Path, Path]:
         )
 
     lines.append("")
-    lines.append("## 2. Coverage by Item")
+    lines.append("## 2. Item Coverage and Lengths")
     lines.append("")
     lines.append("Coverage is shown in two ways:")
     lines.append("- `X out of Y (TOC)` where Y is filings with TOC found for that year+filing.")
     lines.append("- `Coverage % (Total)` where denominator is all filings for that year+filing.")
     lines.append("")
 
-    # Keep table readable: only 10-K and 10-Q style filings
-    target_forms = {"10-K", "10-KA", "10-Q", "10-QA"}
-    lines.append("| Year | Filing | Item | X out of Y (TOC) | Coverage % (TOC Found) | Coverage % (Total) |")
-    lines.append("|---|---|---|---|---:|---:|")
-    for (year, filing, item), count in sorted(item_coverage.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])):
-        if filing not in target_forms:
-            continue
-        total = filing_counts.get((year, filing), 0)
-        toc_found = filing_toc_found_counts.get((year, filing), 0)
-        pct_total = (count / total * 100.0) if total else 0.0
-        pct_toc = (count / toc_found * 100.0) if toc_found else 0.0
-        lines.append(f"| {year} | {filing} | {item} | {count}/{toc_found} | {pct_toc:.2f} | {pct_total:.2f} |")
+    lines.append("See CSV for per-item coverage and word-length stats:")
+    lines.append(f"- `{item_csv}`")
 
     lines.append("")
-    lines.append("## 3. Extra Items (Outside Regulated Scope)")
+    lines.append("## 3. Structure Extraction Summary")
+    lines.append("")
+    lines.append("See CSV for per-item structure stats (headings/bodies/depth/ratios):")
+    lines.append(f"- `{structure_csv}`")
+
+    lines.append("")
+    lines.append("## 4. Extra Items (Outside Regulated Scope)")
     lines.append("")
     if not extra_items:
         lines.append("No extra items found.")
@@ -295,13 +427,14 @@ def build_report(folder: Path) -> Tuple[Path, Path, Path]:
             lines.append(f"| {year} | {filing} | {', '.join(sorted(items))} |")
 
     lines.append("")
-    lines.append("## 4. Artifacts")
+    lines.append("## 5. Artifacts")
     lines.append("")
     lines.append(f"- Year summary CSV: `{year_csv}`")
     lines.append(f"- Item coverage CSV: `{item_csv}`")
+    lines.append(f"- Structure stats CSV: `{structure_csv}`")
 
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return md_path, year_csv, item_csv
+    return md_path, year_csv, item_csv, structure_csv
 
 
 def main() -> int:
@@ -313,10 +446,11 @@ def main() -> int:
     if not folder.exists() or not folder.is_dir():
         raise FileNotFoundError(f"Folder not found: {folder}")
 
-    md_path, year_csv, item_csv = build_report(folder)
+    md_path, year_csv, item_csv, structure_csv = build_report(folder)
     print(f"Report generated: {md_path}")
     print(f"Year summary CSV: {year_csv}")
     print(f"Item coverage CSV: {item_csv}")
+    print(f"Structure stats CSV: {structure_csv}")
     return 0
 
 

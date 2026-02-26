@@ -163,6 +163,19 @@ Contains:
 
 Contains hierarchical heading/body blocks parsed from item HTML.
 
+### Stats / Reporting
+
+`script/stat.py` scans a filings folder and generates:
+- Yearly TOC/item coverage stats
+- Per-item length stats (avg/min/max word count)
+- Structure stats (avg/min/max headings, bodies, depth, and heading/body ratio)
+
+Artifacts:
+- `stats/extraction_performance_<timestamp>.md`
+- `logs/extraction_performance_<timestamp>.csv`
+- `logs/item_coverage_<timestamp>.csv`
+- `logs/structure_stats_<timestamp>.csv`
+
 ## Command Usage
 
 Item extraction:
