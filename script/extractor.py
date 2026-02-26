@@ -226,7 +226,10 @@ def _extract_structure_for_file(
         if "html_content" not in item_data:
             continue
         try:
-            structures[item_num] = structure_extractor.extract_structure(item_data["html_content"])
+            structures[item_num] = structure_extractor.extract_structure(
+                item_data["html_content"],
+                root_heading=item_data.get("item_title"),
+            )
         except Exception as e:
             structures[item_num] = {"error": str(e)}
 
