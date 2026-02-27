@@ -184,6 +184,7 @@ This compares extracted `text_content` against source HTML segments using first/
 ## Technical Docs
 
 - `docs/downloader-technical.md`
-- `docs/extractor-technical.md`
+- `docs/item-extraction-technical.md`
+- `docs/structure-extraction-technical.md`
 
 These docs explain implementation details, decision logic, and resolved edge cases in plain language.
