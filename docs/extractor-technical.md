@@ -175,6 +175,7 @@ Contains hierarchical heading/body blocks parsed from item HTML.
 
 Artifacts:
 - `stats/extraction_stat_<year>_<timestamp>.md`
+- `stats/extraction_stat_overall_<timestamp>.md`
 
 ## Command Usage
 

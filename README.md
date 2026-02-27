@@ -152,6 +152,7 @@ python script/extractor.py --filing_dir sec_filings --filing 10-K --task item --
 
 Outputs:
 - `stats/extraction_stat_<year>_<timestamp>.md`
+- `stats/extraction_stat_overall_<timestamp>.md`
 
 Run:
 
@@ -164,8 +165,8 @@ Each report includes:
 - Yearly TOC/item coverage stats
 - Per-item coverage and length stats (avg/min/max word count)
 - Structure stats (headings/bodies/depth/ratios)
-- Filings with item errors (and error detail)
-- Filings missing expected items (with missing list)
+- Filings with item errors (error counts by message)
+- Filings missing expected items (missing counts by item)
 - Filings missing TOC (CIK list)
 
 ## Validation

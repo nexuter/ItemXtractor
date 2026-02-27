@@ -236,6 +236,40 @@ def build_report(folder: Path, years: Optional[Set[int]] = None) -> List[Path]:
             pct = (idx / total_html * 100.0) if total_html else 100.0
             print(f"[stat] processed {idx}/{total_html} filings ({pct:.1f}%)")
 
+    # Overall summary markdown (previous extraction_performance style)
+    overall_path = stats_dir / f"extraction_stat_overall_{stamp}.md"
+    overall_lines: List[str] = []
+    overall_lines.append("# Extraction Performance Report (Overall)")
+    overall_lines.append("")
+    overall_lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    overall_lines.append(f"Source folder: `{folder}`")
+    overall_lines.append("")
+    overall_lines.append("## Yearly Summary")
+    overall_lines.append("")
+    overall_lines.append("| Year | Filings | TOC Found | TOC Missing | Any Items Extracted | Item JSON | Missing Item JSON | Structure JSON | Avg TOC Items | Avg TOC Anchors | Avg Extracted Items | Filings with Item Errors | Filings Missing Expected Items |")
+    overall_lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    for year in sorted(year_stats.keys()):
+        y = year_stats[year]
+        denom = max(y["item_json_present"], 1)
+        overall_lines.append(
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {:.2f} | {:.2f} | {:.2f} | {} | {} |".format(
+                year,
+                y["filings_total"],
+                y["filings_toc_found"],
+                y["filings_toc_missing"],
+                y["filings_with_any_extracted_items"],
+                y["item_json_present"],
+                y["item_json_missing"],
+                y["str_json_present"],
+                y["toc_items_sum"] / denom,
+                y["toc_anchors_sum"] / denom,
+                y["extracted_items_sum"] / denom,
+                y["filings_with_item_errors"],
+                y["filings_missing_expected_items"],
+            )
+        )
+    overall_path.write_text("\n".join(overall_lines) + "\n", encoding="utf-8")
+
     # Build per-year markdowns
     outputs: List[Path] = []
     for year in sorted(year_stats.keys()):
@@ -274,9 +308,26 @@ def build_report(folder: Path, years: Optional[Set[int]] = None) -> List[Path]:
         lines.append("")
         lines.append("## 2. Item Coverage and Lengths")
         lines.append("")
+        lines.append("Coverage is shown in two ways:")
+        lines.append("")
+        lines.append("X out of Y (TOC) where Y is filings with TOC found for that year+filing.")
+        lines.append("Coverage % (Total) where denominator is all filings for that year+filing.")
+        lines.append("")
         lines.append("| Filing | Item | X out of Y (TOC) | Coverage % (TOC Found) | Coverage % (Total) | Avg Words | Min Words | Max Words |")
         lines.append("|---|---|---|---:|---:|---:|---:|---:|")
-        for (yy, filing, item), count in sorted(item_coverage.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])):
+        def _item_sort_key(item: str) -> Tuple[int, int, str]:
+            m = re.match(r'^(\d+)([a-zA-Z]?)$', item)
+            if not m:
+                return (9999, 0, item)
+            num = int(m.group(1))
+            suffix = m.group(2).upper()
+            suffix_rank = (ord(suffix) - ord('A') + 1) if suffix else 0
+            return (num, suffix_rank, item)
+
+        for (yy, filing, item), count in sorted(
+            item_coverage.items(),
+            key=lambda x: (x[0][0], x[0][1], _item_sort_key(x[0][2])),
+        ):
             if yy != year:
                 continue
             total = filing_counts.get((yy, filing), 0)
@@ -294,7 +345,10 @@ def build_report(folder: Path, years: Optional[Set[int]] = None) -> List[Path]:
         lines.append("")
         lines.append("| Filing | Item | Filings | Avg Headings | Min | Max | Avg Bodies | Min | Max | Avg Depth | Min | Max | Avg H/B | Min | Max |")
         lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
-        for (yy, filing, item), s in sorted(structure_stats.items()):
+        for (yy, filing, item), s in sorted(
+            structure_stats.items(),
+            key=lambda x: (x[0][0], x[0][1], _item_sort_key(x[0][2])),
+        ):
             if yy != year:
                 continue
             count = max(s["count"], 1)
@@ -325,22 +379,30 @@ def build_report(folder: Path, years: Optional[Set[int]] = None) -> List[Path]:
         if not item_errors.get(year):
             lines.append("None.")
         else:
-            lines.append("| CIK | Filing | Item | Error |")
-            lines.append("|---|---|---|---|")
-            for cik, filing, item_num, err in item_errors[year]:
-                lines.append(f"| {cik} | {filing} | {item_num} | {err} |")
+            err_counts = defaultdict(int)
+            for _cik, _filing, _item, err in item_errors[year]:
+                err_counts[err] += 1
+            lines.append("| Error | Count |")
+            lines.append("|---|---:|")
+            for err, cnt in sorted(err_counts.items(), key=lambda x: (-x[1], x[0])):
+                lines.append(f"| {err} | {cnt} |")
 
         lines.append("")
         lines.append("## 5. Filings Missing Expected Items")
         lines.append("")
         lines.append("Expected item list is from `script/config.py`.")
+        lines.append("Note: filings without TOC are excluded from this count.")
         if not missing_expected.get(year):
             lines.append("None.")
         else:
-            lines.append("| CIK | Filing | Missing Items |")
-            lines.append("|---|---|---|")
-            for cik, filing, missing in missing_expected[year]:
-                lines.append(f"| {cik} | {filing} | {missing} |")
+            item_missing_counts = defaultdict(int)
+            for _cik, _filing, missing in missing_expected[year]:
+                for item in [s.strip() for s in missing.split(",") if s.strip()]:
+                    item_missing_counts[item] += 1
+            lines.append("| Item | Missing Count |")
+            lines.append("|---|---:|")
+            for item, cnt in sorted(item_missing_counts.items(), key=lambda x: _item_sort_key(x[0])):
+                lines.append(f"| {item} | {cnt} |")
 
         lines.append("")
         lines.append("## 6. Filings Missing TOC")
@@ -369,6 +431,7 @@ def build_report(folder: Path, years: Optional[Set[int]] = None) -> List[Path]:
         md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         outputs.append(md_path)
 
+    outputs.append(overall_path)
     return outputs
 
 
