@@ -350,3 +350,41 @@ class SECDownloader:
         if filing_url.endswith('.htm'):
             extension = 'htm'
         return response.text, extension, cik
+
+    def download_submission_text_by_accession(
+        self,
+        cik_or_ticker: str,
+        accession_formatted: str
+    ) -> Tuple[str, str]:
+        """
+        Download full SEC submission text (.txt) by accession number.
+
+        This is useful for older filings where fiscal metadata appears in the
+        SEC header (e.g., CONFORMED PERIOD OF REPORT) rather than iXBRL tags.
+
+        Args:
+            cik_or_ticker: CIK number or ticker symbol
+            accession_formatted: Accession number in dashed format
+
+        Returns:
+            Tuple of (submission_text, cik_padded)
+        """
+        cik, _original_identifier = self._normalize_cik(cik_or_ticker)
+        cik_archive = str(int(cik)) if cik.isdigit() else cik.lstrip('0')
+        accession_path = accession_formatted.replace('-', '')
+        txt_url = (
+            f"{SEC_BASE_URL}/Archives/edgar/data/{cik_archive}/"
+            f"{accession_path}/{accession_formatted}.txt"
+        )
+
+        response = None
+        for attempt in range(5):
+            time.sleep(max(1.0, REQUEST_DELAY * (attempt + 1) * 5))
+            response = self.session.get(txt_url, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 200:
+                return response.text, cik
+            if response.status_code == 429:
+                continue
+            break
+
+        raise Exception(f"Failed to download submission text for accession {accession_formatted}")

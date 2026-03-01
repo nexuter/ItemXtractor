@@ -261,6 +261,19 @@ def _extract_dual_dates(html_content: str) -> Tuple[Optional[str], Optional[int]
     if fiscal_year is None and period_of_report:
         fiscal_year = int(period_of_report[:4])
 
+    if fiscal_year is None:
+        # Fallback for older filings: SEC header "CONFORMED PERIOD OF REPORT"
+        header_match = re.search(
+            r'CONFORMED PERIOD OF REPORT:\s*([12]\d{7})',
+            html_content,
+            flags=re.IGNORECASE,
+        )
+        if header_match:
+            raw = header_match.group(1)
+            period_of_report = f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
+            fiscal_year = int(raw[:4])
+            tags_found["CONFORMED PERIOD OF REPORT"] = raw
+
     return period_of_report, fiscal_year, tags_found
 
 
@@ -515,6 +528,14 @@ def download_from_edgar(
             continue
 
         period_of_report, fiscal_year, tags_found = _extract_dual_dates(html_content)
+        if fiscal_year is None:
+            # Older filings may keep period metadata only in SEC submission header text.
+            try:
+                submission_text, _ = downloader.download_submission_text_by_accession(cik, accession)
+                period_of_report, fiscal_year, header_tags = _extract_dual_dates(submission_text)
+                tags_found.update(header_tags)
+            except Exception:
+                pass
         symbols = _extract_trading_symbols(html_content)
         if fiscal_year is None:
             stats["missing_fiscal_metadata"] += 1
