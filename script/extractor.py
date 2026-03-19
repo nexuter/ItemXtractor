@@ -1,7 +1,7 @@
 """
 Extraction-only pipeline.
 
-Reads downloaded filing HTML files from filing_dir and performs:
+Reads downloaded SEC submission .txt files from filing_dir and performs:
 - item extraction -> *_item.json
 - structure extraction -> *_str.json
 """
@@ -11,10 +11,13 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from bs4 import BeautifulSoup
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -24,6 +27,12 @@ from script.config import ITEMS_10K, ITEMS_10Q
 from src.extractor import ItemExtractor
 from src.parser import SECParser
 from src.structure_extractor import StructureExtractor
+from src.submission_parser import (
+    build_document_lookup,
+    resolve_image_document,
+    select_primary_html_document,
+    parse_submission_documents,
+)
 
 
 ITEM_SCOPE_BY_FILING = {
@@ -33,25 +42,27 @@ ITEM_SCOPE_BY_FILING = {
     "10-QA": set(ITEMS_10Q.keys()),
 }
 
+_PART_ORDER = {"I": 1, "II": 2, "III": 3, "IV": 4}
 
-def _item_sort_key(item_num: str) -> tuple[int, str]:
-    """
-    SEC item sort key: numeric part first, then alpha suffix.
-    Examples: 1, 1A, 1B, ..., 9C, 10, 10A
-    """
+
+def _item_sort_key(item_num: str) -> tuple[int, int, str]:
     token = (item_num or "").strip().upper()
+    part_rank = 0
+    bare = token
+    match = re.match(r"^([IVX]+)_(\d+[A-Z]?)$", token)
+    if match:
+        part_rank = _PART_ORDER.get(match.group(1), 99)
+        bare = match.group(2)
+
     i = 0
-    while i < len(token) and token[i].isdigit():
+    while i < len(bare) and bare[i].isdigit():
         i += 1
     if i == 0:
-        return (9999, token)
-    return (int(token[:i]), token[i:])
+        return (part_rank, 9999, bare)
+    return (part_rank, int(bare[:i]), bare[i:])
 
 
 def _load_cik_ticker_map(map_path: Path) -> Dict[str, set[str]]:
-    """
-    Load ticker->cik set mapping from annual map CSV.
-    """
     out: Dict[str, set[str]] = {}
     if not map_path.exists():
         return out
@@ -71,9 +82,6 @@ def _resolve_ciks_from_args(
     tickers: Optional[List[str]],
     ciks: Optional[List[str]],
 ) -> set[str]:
-    """
-    Resolve target CIK folders from explicit CIK args and/or ticker args.
-    """
     target_ciks: set[str] = set()
     for c in ciks or []:
         token = c.strip()
@@ -90,8 +98,7 @@ def _resolve_ciks_from_args(
             sym = t.strip().upper()
             if not sym:
                 continue
-            matched = ticker_map.get(sym, set())
-            target_ciks.update(matched)
+            target_ciks.update(ticker_map.get(sym, set()))
     return target_ciks
 
 
@@ -101,7 +108,7 @@ def _list_filing_files(
     filing_filter: Optional[str],
     year_filter: Optional[set[str]],
 ) -> List[Path]:
-    html_files: List[Path] = []
+    submission_files: List[Path] = []
 
     if target_ciks:
         cik_dirs = [filing_dir / t for t in sorted(target_ciks)]
@@ -122,38 +129,113 @@ def _list_filing_files(
                 if filing_filter and form_dir.name.upper() != filing_filter.upper():
                     continue
                 for f in form_dir.iterdir():
-                    if f.is_file() and f.suffix.lower() in {".htm", ".html"}:
-                        html_files.append(f)
-    html_files.sort()
-    return html_files
+                    if f.is_file() and f.suffix.lower() == ".txt":
+                        submission_files.append(f)
+    submission_files.sort()
+    return submission_files
 
 
 def _parse_path_parts(path: Path, filing_dir: Path) -> Dict[str, str]:
     rel = path.relative_to(filing_dir)
     parts = rel.parts
-    # expected: cik/year/filing/file
     cik = parts[0] if len(parts) >= 1 else ""
     year = parts[1] if len(parts) >= 2 else ""
     filing = parts[2] if len(parts) >= 3 else ""
     return {"cik": cik, "year": year, "filing": filing}
 
 
+def _load_submission_context(txt_path: Path, filing_dir: Path) -> Optional[Dict[str, object]]:
+    meta = _parse_path_parts(txt_path, filing_dir)
+    filing_type = meta["filing"].upper()
+    submission_text = txt_path.read_text(encoding="utf-8", errors="ignore")
+    documents = parse_submission_documents(submission_text)
+    main_doc = select_primary_html_document(documents, filing_type)
+    if not main_doc or not (main_doc.text or "").strip():
+        return None
+    document_lookup = build_document_lookup(documents)
+    return {
+        "meta": meta,
+        "submission_text": submission_text,
+        "documents": documents,
+        "document_lookup": document_lookup,
+        "main_document": main_doc,
+        "html_content": main_doc.text,
+    }
+
+
+def _save_extracted_html(
+    txt_path: Path,
+    html_content: str,
+    overwrite: bool,
+) -> Path:
+    html_path = txt_path.with_suffix(".html")
+    if overwrite or not html_path.exists():
+        html_path.write_text(html_content, encoding="utf-8")
+    return html_path
+
+
+def _save_item_images(
+    *,
+    txt_path: Path,
+    extracted: Dict[str, Dict[str, object]],
+    document_lookup: Dict[str, object],
+    overwrite: bool,
+) -> int:
+    image_root = txt_path.with_name(f"{txt_path.stem}_images")
+    saved = 0
+
+    for item_num, item_data in extracted.items():
+        if not isinstance(item_data, dict):
+            continue
+        item_html = item_data.get("html_content")
+        if not isinstance(item_html, str) or not item_html.strip():
+            continue
+
+        soup = BeautifulSoup(item_html, "html.parser")
+        seen_srcs = set()
+        image_index = 1
+        for img in soup.find_all("img"):
+            src = (img.get("src") or "").strip()
+            if not src or src in seen_srcs:
+                continue
+            seen_srcs.add(src)
+            payload, ext = resolve_image_document(src, document_lookup)
+            if payload is None:
+                continue
+            image_root.mkdir(parents=True, exist_ok=True)
+            safe_item = re.sub(r"[^A-Za-z0-9]+", "_", item_num).strip("_") or "item"
+            extension = ext if ext.startswith(".") else f".{ext}" if ext else ""
+            out_path = image_root / f"{safe_item}_{image_index}{extension}"
+            if overwrite or not out_path.exists():
+                out_path.write_bytes(payload)
+            saved += 1
+            image_index += 1
+
+    return saved
+
+
 def _extract_items_for_file(
     *,
-    html_path: Path,
+    txt_path: Path,
     filing_dir: Path,
     parser: SECParser,
     item_extractor: ItemExtractor,
     overwrite: bool,
+    save_html: bool,
+    save_images: bool,
 ) -> Optional[Path]:
-    base_name = html_path.stem
-    item_out = html_path.with_name(f"{base_name}_item.json")
-    if item_out.exists() and not overwrite:
-        return item_out
+    base_name = txt_path.stem
+    item_out = txt_path.with_name(f"{base_name}_item.json")
+    context = _load_submission_context(txt_path, filing_dir)
+    if context is None:
+        return None
 
-    meta = _parse_path_parts(html_path, filing_dir)
-    filing_type = meta["filing"].upper()
-    html_content = html_path.read_text(encoding="utf-8", errors="ignore")
+    html_content = str(context["html_content"])
+    if save_html:
+        _save_extracted_html(txt_path, html_content, overwrite)
+
+    meta = context["meta"]
+    filing_type = str(meta["filing"]).upper()
     toc_items = parser.parse_toc(html_content, filing_type)
     if not toc_items:
         return None
@@ -162,7 +244,7 @@ def _extract_items_for_file(
     if in_scope:
         selected = {k: v for k, v in toc_items.items() if k in in_scope}
     else:
-        selected = {k: v for k, v in toc_items.items()}
+        selected = dict(toc_items)
     if not selected:
         return None
 
@@ -173,35 +255,53 @@ def _extract_items_for_file(
         except Exception as e:
             extracted[item_num] = {"error": str(e)}
 
+    saved_images = 0
+    if save_images:
+        saved_images = _save_item_images(
+            txt_path=txt_path,
+            extracted=extracted,
+            document_lookup=context["document_lookup"],
+            overwrite=overwrite,
+        )
+
     out = {
         "cik": meta["cik"],
         "year": meta["year"],
         "filing": meta["filing"],
-        "source_file": html_path.name,
+        "source_file": txt_path.name,
+        "source_document": getattr(context["main_document"], "filename", ""),
         "toc_items": selected,
+        "saved_images": saved_images,
         "items": extracted,
     }
-    item_out.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    if overwrite or not item_out.exists():
+        item_out.write_text(json.dumps(out, indent=2), encoding="utf-8")
     return item_out
 
 
 def _extract_structure_for_file(
     *,
-    html_path: Path,
+    txt_path: Path,
     filing_dir: Path,
     parser: SECParser,
     item_extractor: ItemExtractor,
     structure_extractor: StructureExtractor,
     overwrite: bool,
+    save_html: bool,
+    save_images: bool,
 ) -> Optional[Path]:
-    base_name = html_path.stem
-    str_out = html_path.with_name(f"{base_name}_str.json")
-    if str_out.exists() and not overwrite:
-        return str_out
+    base_name = txt_path.stem
+    str_out = txt_path.with_name(f"{base_name}_str.json")
 
-    item_out = html_path.with_name(f"{base_name}_item.json")
+    context = _load_submission_context(txt_path, filing_dir)
+    if context is None:
+        return None
+    if save_html:
+        _save_extracted_html(txt_path, str(context["html_content"]), overwrite)
+
+    item_out = txt_path.with_name(f"{base_name}_item.json")
     item_payload = None
-    if item_out.exists():
+    if item_out.exists() and not overwrite:
         try:
             item_payload = json.loads(item_out.read_text(encoding="utf-8"))
         except Exception:
@@ -209,15 +309,24 @@ def _extract_structure_for_file(
 
     if item_payload is None:
         item_path = _extract_items_for_file(
-            html_path=html_path,
+            txt_path=txt_path,
             filing_dir=filing_dir,
             parser=parser,
             item_extractor=item_extractor,
             overwrite=overwrite,
+            save_html=save_html,
+            save_images=save_images,
         )
         if not item_path or not item_path.exists():
             return None
         item_payload = json.loads(item_path.read_text(encoding="utf-8"))
+    elif save_images:
+        _save_item_images(
+            txt_path=txt_path,
+            extracted=item_payload.get("items", {}),
+            document_lookup=context["document_lookup"],
+            overwrite=overwrite,
+        )
 
     structures = {}
     for item_num, item_data in item_payload.get("items", {}).items():
@@ -238,14 +347,16 @@ def _extract_structure_for_file(
         "year": item_payload.get("year"),
         "filing": item_payload.get("filing"),
         "source_file": item_payload.get("source_file"),
+        "source_document": item_payload.get("source_document"),
         "structures": structures,
     }
-    str_out.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    if overwrite or not str_out.exists():
+        str_out.write_text(json.dumps(out, indent=2), encoding="utf-8")
     return str_out
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Extract items or structures from downloaded filings.")
+    parser = argparse.ArgumentParser(description="Extract items or structures from downloaded SEC submission text files.")
     parser.add_argument("--ticker", nargs="+", dest="tickers", default=None, help="Ticker symbol filter(s).")
     parser.add_argument("--cik", nargs="+", dest="ciks", default=None, help="CIK folder filter(s).")
     parser.add_argument("--filing", default=None, help="Filing folder filter (e.g., 10-K).")
@@ -253,6 +364,8 @@ def main() -> None:
     parser.add_argument("--filing_dir", required=True, help="Root folder where filings are stored.")
     parser.add_argument("--task", required=True, choices=["item", "structure"], help="Extraction task.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite extraction outputs.")
+    parser.add_argument("--html", action="store_true", help="Save the extracted main filing HTML beside each submission .txt.")
+    parser.add_argument("--image", action="store_true", help="Save item images resolved from submission documents.")
     parser.add_argument(
         "--progress_every",
         type=int,
@@ -273,37 +386,49 @@ def main() -> None:
     year_filter = {str(y).strip() for y in (args.years or []) if str(y).strip()}
     if args.tickers and not target_ciks and not args.ciks:
         print(
-            f"No CIK match found for provided ticker(s) in "
-            f"filing_dir/_meta/cik_ticker_map_edgar.csv"
+            "No CIK match found for provided ticker(s) in "
+            "filing_dir/_meta/cik_ticker_map_edgar.csv"
         )
-    html_files = _list_filing_files(filing_dir, target_ciks, args.filing, year_filter if year_filter else None)
-    print(f"Found filings: {len(html_files)}")
+
+    submission_files = _list_filing_files(
+        filing_dir,
+        target_ciks,
+        args.filing,
+        year_filter if year_filter else None,
+    )
+    print(f"Found filings: {len(submission_files)}")
+
     done = 0
     skipped = 0
     started_at = time.time()
-    total = len(html_files)
-    for i, html_file in enumerate(html_files, start=1):
+    total = len(submission_files)
+    for i, txt_file in enumerate(submission_files, start=1):
         if args.task == "item":
             out = _extract_items_for_file(
-                html_path=html_file,
+                txt_path=txt_file,
                 filing_dir=filing_dir,
                 parser=sec_parser,
                 item_extractor=item_extractor,
                 overwrite=args.overwrite,
+                save_html=args.html,
+                save_images=args.image,
             )
         else:
             out = _extract_structure_for_file(
-                html_path=html_file,
+                txt_path=txt_file,
                 filing_dir=filing_dir,
                 parser=sec_parser,
                 item_extractor=item_extractor,
                 structure_extractor=structure_extractor,
                 overwrite=args.overwrite,
+                save_html=args.html,
+                save_images=args.image,
             )
         if out:
             done += 1
         else:
             skipped += 1
+
         if total > 0 and (i == 1 or i % max(args.progress_every, 1) == 0 or i == total):
             elapsed = time.time() - started_at
             rate = i / elapsed if elapsed > 0 else 0.0

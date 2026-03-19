@@ -1,127 +1,131 @@
 # Item Extraction Technical Guide
 
-This document explains how item extraction works and why the pipeline uses TOC‑driven boundaries.
+This document explains how item extraction works in the submission-text pipeline.
 
 ## Purpose
 
-Item extraction reads filing HTML and outputs:
+Item extraction reads a saved SEC submission `.txt`, selects the primary filing HTML from its `<DOCUMENT>` blocks, and outputs:
 - `*_item.json` containing item HTML + text
-- TOC entries used for boundary selection
+- optional saved filing HTML (`--html`)
+- optional extracted item images (`--image`)
 
 It does not download filings.
 
-## Why TOC‑Driven Extraction
+## High-Level Flow
+
+1. Load submission `.txt`
+2. Parse SEC `<DOCUMENT>` blocks
+3. Choose the primary filing HTML document
+4. Parse TOC from that HTML
+5. Keep in-scope items from `script/config.py`
+6. Compute item boundaries
+7. Extract item HTML + text
+8. Save `{cik}_{year}_{filing}_item.json`
+
+## Why TOC-Driven Extraction Still Matters
+
+Even though the pipeline now starts from submission text instead of standalone filing HTML, the actual item extraction step still works on the filing HTML document itself.
 
 SEC filings vary in item heading formats:
 - `Item 1. Business`
 - `ITEM 1 BUSINESS`
 - `1. Business`
-- compact inline‑XBRL variants
+- compact inline XBRL variants
 
-Parsing headings across the entire document causes boundary errors. TOC anchors are the most stable and reliable item boundary references when present.
+TOC anchors remain the most reliable boundary signals when present.
 
-## High‑Level Flow
+## Submission Parsing Strategy
 
-1. Load filing HTML
-2. Parse TOC
-3. Keep in‑scope items from `script/config.py`
-4. Compute item boundaries
-5. Extract item HTML + text
-6. Save `{cik}_{year}_{filing}_item.json`
+The extractor parses each submission `.txt` into document blocks using:
+- `<DOCUMENT>`
+- `<TYPE>`
+- `<SEQUENCE>`
+- `<FILENAME>`
+- `<DESCRIPTION>`
+- `<TEXT>`
+
+The main filing HTML is selected by scoring document candidates using:
+- form match (`10-K`, `10-Q`, etc.)
+- sequence number
+- HTML-like filename
+- HTML-like payload content
 
 ## TOC Parsing Strategy
 
 Parser combines multiple methods:
 - TOC table parsing
-- TOC link parsing (important for inline‑XBRL formats)
+- TOC link parsing
 - guarded structural fallback
 
 Rules:
 - TOC is required. If no TOC is found, extraction is skipped.
-- Anchored entries are not overwritten by weaker unanchored rows.
-- TOC appearance order is preserved (do not sort by item number).
+- anchored entries are not overwritten by weaker unanchored rows
+- TOC appearance order is preserved
 
-### Example: TOC Link Recovery
+## 10-Q Part-Aware Keys
 
-Some filings use index‑style links without a clear `Table of Contents` header. Link parsing recovers anchors from `<a href="#ITEM1">` and similar links.
+10-Q filings reuse item numbers across Part I and Part II, so plain item keys would collide.
+
+The extractor now uses part-qualified keys:
+- `I_1`, `I_2`, `I_3`, `I_4`
+- `II_1`, `II_1A`, `II_2`, `II_3`, `II_4`, `II_5`, `II_6`
+
+The parser assigns these keys during TOC parsing and normalizes missing part context where possible.
 
 ## Item Boundary Strategy
 
 Primary boundary logic:
-- Start at current item anchor (or fallback heading if anchor missing).
-- End at next item anchor.
-- If next anchor is missing, use next item heading fallback within a bounded range.
-- Same‑anchor siblings (e.g., `Items 1 and 2`) share the same boundary.
-
-### Example: Combined Rows
-
-TOC row:
-```
-Items 1 and 2 … [same anchor]
-```
-
-Boundary result:
-- Item 1 and Item 2 use the same HTML span
-- Both end at the next distinct item anchor
+- start at current item anchor, or fallback heading if anchor is missing
+- end at next item anchor
+- if next anchor is missing, use next item heading fallback within a bounded range
+- same-anchor siblings such as `Items 1 and 2` share the same boundary
 
 ## Text Normalization Strategy
 
 Generic cleanup:
-- remove zero‑width/control artifacts
+- remove zero-width/control artifacts
 - normalize smart quotes and dash variants
 - remove page markers
 - drop TOC fragments and `Table of Contents` lines
-- keep valid numeric tokens that are part of real content
 
-## Terminal Marker Trimming
+Terminal marker trimming:
+- cut when `Not applicable.` or `None.` appears first after item title
+- do not cut when it appears later in the item text
 
-Deterministic rule:
-- Cut when `Not applicable.` or `None.` appears first after item title.
-- Do not cut when it appears later in the item text.
+## Optional HTML Saving
 
-### Example
+If `--html` is provided, the extractor writes the selected primary filing HTML beside the submission text:
 
-```
-Item 16. Form 10‑K Summary
-Not applicable. 94
+```text
+{cik}_{fiscal_year}_{filing}.html
 ```
 
-Trimmed to:
+This is useful for debugging selection quality and validating extracted boundaries.
+
+## Optional Image Saving
+
+If `--image` is provided, the extractor:
+- scans `<img>` tags found in extracted item HTML
+- resolves image references against other submission `<DOCUMENT>` blocks
+- saves decodable payloads under:
+
+```text
+{cik}_{fiscal_year}_{filing}_images/
+  {item}_{index}.{ext}
 ```
-Item 16. Form 10‑K Summary
-Not applicable.
-```
 
-## Real Cases Found and Resolved
-
-### Case 1: TOC exists but parser skipped filing
-
-Pattern: index‑style TOC links in header or compact rows  
-Fix: stronger link parsing + anchor merge behavior
-
-### Case 2: PART rows with item in same row
-
-Pattern:
-`PART I. 1. Business ...`  
-Fix: parse multi‑item rows and part‑prefixed rows
-
-### Case 3: Missing anchors for some items
-
-Fix: allow selection without anchor and fallback to heading‑based boundaries
-
-### Case 4: Item spillover to filing end
-
-Fix: end‑boundary fallback uses next heading candidates when next anchor missing
-
-### Case 5: Combined `Items 1 and 2`
-
-Fix: same‑anchor items share boundaries; order preserved
+Supported cases include:
+- `data:` URIs
+- uuencoded payloads
+- base64-like payloads
+- plain text fallback when the image document is not binary-encoded
 
 ## Output Format
 
 `*_item.json` includes:
 - filing identity metadata
-- parsed TOC entries used for extraction
+- selected TOC entries
+- saved image count
 - extracted item map:
   - `item_number`
   - `item_title`
@@ -136,14 +140,20 @@ Extract items:
 python script/extractor.py --filing_dir sec_filings --filing 10-K --task item --overwrite
 ```
 
-Year scope:
+Extract items and save HTML:
 
 ```bash
-python script/extractor.py --filing_dir sec_filings --filing 10-K --year 2024 --task item
+python script/extractor.py --filing_dir sec_filings --filing 10-K --task item --html
+```
+
+Extract 10-Q items and save images:
+
+```bash
+python script/extractor.py --filing_dir sec_filings --filing 10-Q --task item --image
 ```
 
 ## What Item Extraction Does Not Do
 
 - It does not download filings.
-- It does not infer items without TOC policy approval.
-- It does not force a global title template.
+- It does not classify fiscal year from document narrative.
+- It does not keep every submission attachment; it only selects the primary filing HTML plus optional image payloads needed by extracted items.

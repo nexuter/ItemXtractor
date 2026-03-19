@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.downloader import SECDownloader
 from src.index_parser import SECIndexParser
-from src.file_manager import FileManager
+from src.submission_parser import extract_period_of_report, extract_trading_symbols
 
 
 FILING_CODE_MAP: Dict[str, Tuple[str, str]] = {
@@ -237,62 +237,6 @@ def _report_progress(
     )
 
 
-def _extract_dual_dates(html_content: str) -> Tuple[Optional[str], Optional[int], Dict[str, str]]:
-    tags_found: Dict[str, str] = {}
-
-    fy_match = re.search(
-        r'name="dei:DocumentFiscalYearFocus"[^>]*>\s*([12]\d{3})\s*<',
-        html_content,
-        flags=re.IGNORECASE,
-    )
-    fiscal_year = int(fy_match.group(1)) if fy_match else None
-    if fy_match:
-        tags_found["dei:DocumentFiscalYearFocus"] = fy_match.group(1)
-
-    period_match = re.search(
-        r'name="dei:DocumentPeriodEndDate"[^>]*>\s*([12]\d{3}-\d{2}-\d{2})\s*<',
-        html_content,
-        flags=re.IGNORECASE,
-    )
-    period_of_report = period_match.group(1) if period_match else None
-    if period_match:
-        tags_found["dei:DocumentPeriodEndDate"] = period_match.group(1)
-
-    if fiscal_year is None and period_of_report:
-        fiscal_year = int(period_of_report[:4])
-
-    if fiscal_year is None:
-        # Fallback for older filings: SEC header "CONFORMED PERIOD OF REPORT"
-        header_match = re.search(
-            r'CONFORMED PERIOD OF REPORT:\s*([12]\d{7})',
-            html_content,
-            flags=re.IGNORECASE,
-        )
-        if header_match:
-            raw = header_match.group(1)
-            period_of_report = f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
-            fiscal_year = int(raw[:4])
-            tags_found["CONFORMED PERIOD OF REPORT"] = raw
-
-    return period_of_report, fiscal_year, tags_found
-
-
-def _extract_trading_symbols(html_content: str) -> List[str]:
-    symbols = re.findall(
-        r'name="dei:TradingSymbol"[^>]*>\s*([A-Za-z0-9\.\-]+)\s*<',
-        html_content,
-        flags=re.IGNORECASE,
-    )
-    out: List[str] = []
-    seen: Set[str] = set()
-    for sym in symbols:
-        token = sym.strip().upper()
-        if token and token not in seen:
-            seen.add(token)
-            out.append(token)
-    return out
-
-
 def _parse_filing_date(value: str) -> Optional[date]:
     for fmt in ("%Y-%m-%d", "%Y-%m", "%Y%m%d"):
         try:
@@ -421,26 +365,24 @@ def _upsert_cik_ticker_map(
 
 
 def _save_filing_and_meta(
-    fm: FileManager,
     output_dir: Path,
     cik: str,
     fiscal_year: int,
     folder_form: str,
-    extension: str,
-    html_content: str,
+    submission_text: str,
     meta: Dict[str, object],
     overwrite: bool,
 ) -> str:
     filing_dir = output_dir / cik / str(fiscal_year) / folder_form
     filing_dir.mkdir(parents=True, exist_ok=True)
     base_name = f"{cik}_{fiscal_year}_{folder_form}"
-    filing_path = filing_dir / f"{base_name}.{extension}"
+    filing_path = filing_dir / f"{base_name}.txt"
     meta_path = filing_dir / f"{base_name}_meta.json"
 
     if filing_path.exists() and not overwrite:
         return "skipped_exists"
 
-    fm.save_html(str(filing_path), html_content)
+    filing_path.write_text(submission_text, encoding="utf-8")
     with meta_path.open("w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
     return "downloaded"
@@ -459,7 +401,6 @@ def download_from_edgar(
     user_agent: str,
 ) -> None:
     downloader = SECDownloader(user_agent=user_agent)
-    fm = FileManager(str(output_dir))
     map_path = output_dir / "_meta" / "cik_ticker_map_edgar.csv"
     legacy_map_path = output_dir / "_meta" / "cik_ticker_map.csv"
     input_ticker_by_cik = _normalize_ticker_input_map(downloader, tickers)
@@ -517,26 +458,18 @@ def download_from_edgar(
             continue
 
         try:
-            html_content, ext, normalized_cik = downloader.download_filing_by_accession(cik, accession)
-        except Exception:
+            submission_text, normalized_cik = downloader.download_submission_text_by_accession(cik, accession)
+        except Exception as e:
             stats["failed_download"] += 1
             # Filing-date window already matched at least one target FY.
             for fy in fiscal_years:
                 if _in_window_for_fiscal_year(filing_date, fy, lookahead_months):
                     stats_by_year[fy]["failed_download"] += 1
-            print(f"{status_prefix} result=failed_download")
+            print(f"{status_prefix} result=failed_download reason={str(e)[:120]}")
             continue
 
-        period_of_report, fiscal_year, tags_found = _extract_dual_dates(html_content)
-        if fiscal_year is None:
-            # Older filings may keep period metadata only in SEC submission header text.
-            try:
-                submission_text, _ = downloader.download_submission_text_by_accession(cik, accession)
-                period_of_report, fiscal_year, header_tags = _extract_dual_dates(submission_text)
-                tags_found.update(header_tags)
-            except Exception:
-                pass
-        symbols = _extract_trading_symbols(html_content)
+        period_of_report, fiscal_year, tags_found = extract_period_of_report(submission_text)
+        symbols = extract_trading_symbols(submission_text)
         if fiscal_year is None:
             stats["missing_fiscal_metadata"] += 1
             for fy in fiscal_years:
@@ -544,9 +477,16 @@ def download_from_edgar(
                     stats_by_year[fy]["missing_fiscal_metadata"] += 1
             print(f"{status_prefix} result=missing_fiscal_metadata")
             continue
-        if fiscal_year not in fiscal_years:
+        if fiscal_year not in fiscal_years or not _in_window_for_fiscal_year(
+            filing_date,
+            fiscal_year,
+            lookahead_months,
+        ):
             stats["skipped_outside_target_fy"] += 1
-            print(f"{status_prefix} result=skipped_outside_target_fy fiscal_year={fiscal_year}")
+            print(
+                f"{status_prefix} result=skipped_outside_target_fy "
+                f"fiscal_year={fiscal_year} period_of_report={period_of_report}"
+            )
             continue
 
         meta = {
@@ -563,13 +503,11 @@ def download_from_edgar(
             "ticker_symbols": symbols,
         }
         state = _save_filing_and_meta(
-            fm=fm,
             output_dir=output_dir,
             cik=normalized_cik,
             fiscal_year=fiscal_year,
             folder_form=folder_form,
-            extension=ext,
-            html_content=html_content,
+            submission_text=submission_text,
             meta=meta,
             overwrite=overwrite,
         )
@@ -634,7 +572,7 @@ def main() -> None:
         type=int,
         default=12,
         dest="lookahead_months",
-        help="Lookahead months for dual-date filtering (default: 12).",
+        help="Lookahead months for filing-date candidate windows and final fiscal-year validation (default: 12).",
     )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing filings.")
     parser.add_argument("--list-only", action="store_true", help="Build fiscal-year filing list only (no download).")

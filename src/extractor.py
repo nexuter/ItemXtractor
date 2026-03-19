@@ -94,12 +94,13 @@ class ItemExtractor:
         - Treat early 'Not applicable.' as terminal item content
         """
         out = text.strip()
+        item_token = self.parser._bare_item_key(item_number)
 
         # Remove leading page number immediately before item heading
         out = re.sub(r'^\s*\d{1,3}\s+(?=ITEM\s+\d+[A-Z]?\b)', '', out, flags=re.IGNORECASE)
 
         # Trim any preamble before first explicit item heading for this item
-        item_head = re.search(rf'ITEM\s+{re.escape(item_number)}\s*[.:]?\s*', out, flags=re.IGNORECASE)
+        item_head = re.search(rf'ITEM\s+{re.escape(item_token)}\s*[.:]?\s*', out, flags=re.IGNORECASE)
         if item_head:
             out = out[item_head.start():]
 
@@ -110,7 +111,7 @@ class ItemExtractor:
         # - marker found in early window right after "ITEM X"
         # - no sentence-ending punctuation before marker in that early window
         heading = re.search(
-            rf"ITEM\s+{re.escape(item_number)}\s*[.:]?\s*",
+            rf"ITEM\s+{re.escape(item_token)}\s*[.:]?\s*",
             out,
             flags=re.IGNORECASE,
         )

@@ -59,8 +59,8 @@ def _walk_structure(nodes: List[dict]) -> Tuple[int, int, int]:
     return heading_count, body_count, max_depth
 
 
-def _iter_filing_htmls(root: Path, years: Optional[Set[int]] = None):
-    # root/{cik}/{year}/{filing}/{base}.htm|html
+def _iter_filing_submissions(root: Path, years: Optional[Set[int]] = None):
+    # root/{cik}/{year}/{filing}/{base}.txt
     for cik_dir in root.iterdir():
         if not cik_dir.is_dir() or not cik_dir.name.isdigit():
             continue
@@ -77,9 +77,9 @@ def _iter_filing_htmls(root: Path, years: Optional[Set[int]] = None):
                 if not filing_dir.is_dir():
                     continue
                 filing = filing_dir.name.upper()
-                for html_path in filing_dir.iterdir():
-                    if html_path.is_file() and html_path.suffix.lower() in {".htm", ".html"}:
-                        yield cik, year, filing, html_path
+                for submission_path in filing_dir.iterdir():
+                    if submission_path.is_file() and submission_path.suffix.lower() == ".txt":
+                        yield cik, year, filing, submission_path
 
 
 def _load_json(path: Path) -> Optional[dict]:
@@ -146,17 +146,17 @@ def build_report(folder: Path, years: Optional[Set[int]] = None) -> List[Path]:
         "ratio_max": None,
     })
 
-    html_list = list(_iter_filing_htmls(folder, years=years))
-    total_html = len(html_list)
+    submission_list = list(_iter_filing_submissions(folder, years=years))
+    total_submissions = len(submission_list)
 
-    for idx, (cik, year, filing, html_path) in enumerate(html_list, start=1):
+    for idx, (cik, year, filing, submission_path) in enumerate(submission_list, start=1):
         y = year_stats[year]
         y["filings_total"] += 1
         filing_counts[(year, filing)] += 1
 
-        base = html_path.stem
-        item_path = html_path.with_name(f"{base}_item.json")
-        str_path = html_path.with_name(f"{base}_str.json")
+        base = submission_path.stem
+        item_path = submission_path.with_name(f"{base}_item.json")
+        str_path = submission_path.with_name(f"{base}_str.json")
 
         if str_path.exists():
             y["str_json_present"] += 1
@@ -165,7 +165,7 @@ def build_report(folder: Path, years: Optional[Set[int]] = None) -> List[Path]:
         if not item_payload:
             y["item_json_missing"] += 1
             y["filings_toc_missing"] += 1
-            missing_toc[year].append((cik, filing, html_path.name))
+            missing_toc[year].append((cik, filing, submission_path.name))
             continue
 
         y["item_json_present"] += 1
@@ -232,9 +232,9 @@ def build_report(folder: Path, years: Optional[Set[int]] = None) -> List[Path]:
                     s["ratio_min"] = ratio if s["ratio_min"] is None else min(s["ratio_min"], ratio)
                     s["ratio_max"] = ratio if s["ratio_max"] is None else max(s["ratio_max"], ratio)
 
-        if idx % 100 == 0 or idx == total_html:
-            pct = (idx / total_html * 100.0) if total_html else 100.0
-            print(f"[stat] processed {idx}/{total_html} filings ({pct:.1f}%)")
+        if idx % 100 == 0 or idx == total_submissions:
+            pct = (idx / total_submissions * 100.0) if total_submissions else 100.0
+            print(f"[stat] processed {idx}/{total_submissions} filings ({pct:.1f}%)")
 
     # Overall summary markdown (previous extraction_performance style)
     overall_path = stats_dir / f"extraction_stat_overall_{stamp}.md"

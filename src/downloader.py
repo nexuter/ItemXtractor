@@ -222,7 +222,12 @@ class SECDownloader:
         except Exception as e:
             raise Exception(f"Failed to get filing URL: {str(e)}")
 
-    def _get_document_url_from_accession(self, cik: str, accession_formatted: str) -> Optional[str]:
+    def _get_document_url_from_accession(
+        self,
+        cik: str,
+        accession_formatted: str,
+        expected_form: Optional[str] = None
+    ) -> Optional[str]:
         """
         Resolve the main filing document URL from a CIK and accession number.
 
@@ -241,14 +246,21 @@ class SECDownloader:
         )
 
         doc_response = None
-        for attempt in range(5):
-            time.sleep(max(1.0, REQUEST_DELAY * (attempt + 1) * 5))
-            doc_response = self.session.get(doc_index_url, timeout=REQUEST_TIMEOUT)
-            if doc_response.status_code == 200:
-                break
-            if doc_response.status_code == 429:
+        for attempt in range(8):
+            time.sleep(max(1.0, REQUEST_DELAY * (attempt + 1) * 3))
+            try:
+                doc_response = self.session.get(doc_index_url, timeout=REQUEST_TIMEOUT)
+            except Exception:
                 continue
-            return None
+            if doc_response.status_code in {429, 403, 500, 502, 503, 504}:
+                continue
+            if doc_response.status_code != 200:
+                return None
+            # SEC may return a throttling/access page with 200 status.
+            txt = (doc_response.text or "")[:4000].lower()
+            if "access denied" in txt or "undeclared automated tool" in txt:
+                continue
+            break
         if doc_response is None or doc_response.status_code != 200:
             return None
 
@@ -259,28 +271,55 @@ class SECDownloader:
 
         rows = table.find_all('tr')[1:]  # Skip header
 
-        # Prefer sequence 1 HTML/HTM.
+        candidates = []
+        target_form = (expected_form or "").upper().strip()
         for row in rows:
             cols = row.find_all('td')
             if len(cols) < 4:
                 continue
             sequence = cols[0].text.strip()
             filename = cols[2].text.strip()
-            if sequence != '1':
-                continue
-            if not (filename.endswith('.htm') or filename.endswith('.html') or 'htm' in filename):
-                continue
-
+            doc_type = cols[3].text.strip().upper()
             link = cols[2].find('a')
             if not link or not link.get('href'):
                 continue
+
+            filename_l = filename.lower()
+            is_html = filename_l.endswith('.htm') or filename_l.endswith('.html') or '.htm' in filename_l
+            if not is_html:
+                continue
+
             href = link['href']
             if '/ix?doc=' in href:
                 doc_path = href.split('/ix?doc=')[1]
-                return f"{SEC_BASE_URL}{doc_path}"
-            return f"{SEC_BASE_URL}{href}"
+                url = f"{SEC_BASE_URL}{doc_path}"
+            else:
+                url = f"{SEC_BASE_URL}{href}"
 
-        return None
+            score = 0
+            if sequence == '1':
+                score += 20
+            if target_form:
+                if doc_type == target_form:
+                    score += 50
+                elif doc_type.startswith(target_form):
+                    score += 40
+                elif target_form in doc_type:
+                    score += 30
+            if filename_l.endswith('.htm') or filename_l.endswith('.html'):
+                score += 5
+
+            candidates.append((score, sequence, url))
+
+        if not candidates:
+            # Some filings are text-only submissions (no HTML row in filing index).
+            return (
+                f"{SEC_BASE_URL}/Archives/edgar/data/{cik_archive}/"
+                f"{accession_path}/{accession_formatted}.txt"
+            )
+
+        candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        return candidates[0][2]
 
     
     def download_filing(self, cik_or_ticker: str, filing_type: str,
@@ -325,7 +364,8 @@ class SECDownloader:
     def download_filing_by_accession(
         self,
         cik_or_ticker: str,
-        accession_formatted: str
+        accession_formatted: str,
+        expected_form: Optional[str] = None
     ) -> Tuple[str, str, str]:
         """
         Download a filing by accession number.
@@ -338,17 +378,36 @@ class SECDownloader:
             Tuple of (HTML content, file extension, CIK padded to 10 digits)
         """
         cik, _original_identifier = self._normalize_cik(cik_or_ticker)
-        filing_url = self._get_document_url_from_accession(cik, accession_formatted)
+        filing_url = self._get_document_url_from_accession(
+            cik,
+            accession_formatted,
+            expected_form=expected_form,
+        )
         if not filing_url:
             raise Exception(f"No filing document found for accession {accession_formatted}")
 
-        time.sleep(REQUEST_DELAY)
-        response = self.session.get(filing_url, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
+        response = None
+        for attempt in range(8):
+            time.sleep(max(REQUEST_DELAY, 0.5) * (attempt + 1))
+            try:
+                response = self.session.get(filing_url, timeout=REQUEST_TIMEOUT)
+            except Exception:
+                continue
+            if response.status_code in {429, 403, 500, 502, 503, 504}:
+                continue
+            response.raise_for_status()
+            txt = (response.text or "")[:4000].lower()
+            if "access denied" in txt or "undeclared automated tool" in txt:
+                continue
+            break
+        if response is None or response.status_code != 200:
+            raise Exception(f"Failed to download filing URL for accession {accession_formatted}")
 
         extension = 'html'
         if filing_url.endswith('.htm'):
             extension = 'htm'
+        elif filing_url.endswith('.txt'):
+            extension = 'txt'
         return response.text, extension, cik
 
     def download_submission_text_by_accession(

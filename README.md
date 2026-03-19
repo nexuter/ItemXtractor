@@ -1,8 +1,8 @@
 # ItemXtractor
 
 EDGAR-based pipeline to:
-- download SEC filings by fiscal-year windows
-- extract filing items using TOC-driven boundaries
+- download SEC submission `.txt` files by fiscal-year windows
+- extract filing items from the primary HTML document embedded in each submission
 - optionally extract heading/body structure from extracted items
 
 Current architecture is split by step:
@@ -12,10 +12,11 @@ Current architecture is split by step:
 
 ## What This Project Does
 
-1. Download filings from EDGAR with dual-date logic.
-2. Save filings under fiscal-year folders.
-3. Extract item-level content from downloaded filings.
-4. Extract structured heading/body sections from item outputs.
+1. Pull candidate filings from EDGAR full index using filing-date windows.
+2. Download the SEC submission `.txt` for each candidate accession.
+3. Read `PERIOD OF REPORT` from the submission header to identify the filing fiscal year.
+4. Keep only filings whose fiscal year is requested and whose filing date fits that fiscal year's lookahead window.
+5. During extraction, parse `<DOCUMENT>` blocks inside the saved submission `.txt`, choose the primary filing HTML, and run TOC-driven item/structure extraction.
 
 ## Folder Layout
 
@@ -23,15 +24,23 @@ Downloaded filings are stored as:
 
 ```text
 {output_dir}/{cik}/{fiscal_year}/{filing}/
-  {cik}_{fiscal_year}_{filing}.htm|html
+  {cik}_{fiscal_year}_{filing}.txt
   {cik}_{fiscal_year}_{filing}_meta.json
 ```
 
-Item extraction output is saved next to each filing:
+Extraction output is saved next to each submission:
 
 ```text
 {cik}_{fiscal_year}_{filing}_item.json
 {cik}_{fiscal_year}_{filing}_str.json
+```
+
+Optional extractor artifacts:
+
+```text
+{cik}_{fiscal_year}_{filing}.html
+{cik}_{fiscal_year}_{filing}_images/
+  {item}_{index}.{ext}
 ```
 
 ## Install
@@ -58,9 +67,12 @@ usage: downloader.py [-h] [--ticker TICKERS [TICKERS ...] | --cik CIKS [CIKS ...
 ### Key behavior
 
 - `--year` means fiscal year target(s), not filing-date year.
-- Downloader searches EDGAR index records in fiscal-year windows using `filing_date`.
-- It validates fiscal year from filing metadata (for example `DocumentFiscalYearFocus` / `DocumentPeriodEndDate`).
+- Candidate records come from EDGAR full index, filtered by filing date using the requested lookahead window.
+- Final acceptance uses both:
+  - `PERIOD OF REPORT` / `CONFORMED PERIOD OF REPORT` parsed from the submission `.txt`
+  - filing-date window validation for the extracted fiscal year
 - If `--list-only` is used, no filings are downloaded; only list/report outputs are generated.
+- If the submission text does not expose a recognizable report-period header, the filing is counted as `missing_fiscal_metadata`.
 
 ### Examples
 
@@ -70,7 +82,7 @@ Download 10-K fiscal years 2023 and 2024:
 python script/downloader.py --filing 10k --year 2023 2024 --output_dir sec_filings --user_agent "Your Org (email@domain.com)"
 ```
 
-List-only dry run (no download):
+List-only dry run:
 
 ```bash
 python script/downloader.py --filing 10k --year 2023 2024 --output_dir sec_filings --list-only --user_agent "Your Org (email@domain.com)"
@@ -90,7 +102,7 @@ python script/downloader.py --filing 10k --year 2023 2024 --output_dir sec_filin
 
 ## Extractor
 
-`script/extractor.py` processes already-downloaded filings.
+`script/extractor.py` processes already-downloaded submission `.txt` files.
 
 ```text
 usage: extractor.py [-h]
@@ -101,54 +113,45 @@ usage: extractor.py [-h]
                     --filing_dir FILING_DIR
                     --task {item,structure}
                     [--overwrite]
+                    [--html]
+                    [--image]
                     [--progress_every PROGRESS_EVERY]
 ```
 
 ### Examples
 
-Extract items for all CIKs under `sec_filings`:
+Extract items for all 10-K submissions under `sec_filings`:
 
 ```bash
 python script/extractor.py --filing_dir sec_filings --filing 10-K --task item
 ```
 
-Extract structures from existing item outputs:
+Extract structures and save the primary filing HTML beside each submission:
 
 ```bash
-python script/extractor.py --filing_dir sec_filings --filing 10-K --task structure
+python script/extractor.py --filing_dir sec_filings --filing 10-K --task structure --html
 ```
 
-Year filter:
+Save item images resolved from submission documents:
 
 ```bash
-python script/extractor.py --filing_dir sec_filings --filing 10-K --year 2024 --task item
+python script/extractor.py --filing_dir sec_filings --filing 10-Q --task item --image
 ```
 
-Filter by CIK/ticker:
+### Notes
 
-```bash
-python script/extractor.py --filing_dir sec_filings --filing 10-K --task item --cik 0000001750
-python script/extractor.py --filing_dir sec_filings --filing 10-K --task item --ticker AAPL
-```
-
-Show frequent progress updates with elapsed/ETA:
-
-```bash
-python script/extractor.py --filing_dir sec_filings --filing 10-K --task item --overwrite --progress_every 25
-```
-
-## Notes
-
-- Item extraction is TOC-driven. If TOC is not detected, extraction for that filing is skipped.
+- The extractor parses SEC `<DOCUMENT>` blocks and selects the main filing HTML from the submission container.
+- TOC detection is still required. If no TOC is found, extraction for that filing is skipped.
 - Extraction only keeps regulated item scope from `script/config.py`.
 - Existing output files are skipped unless `--overwrite` is set.
-- `--task structure` reuses existing `*_item.json`. It only runs item extraction first if `*_item.json` is missing.
-- Combined TOC rows like `Items 1 and 2` are supported. When both map to one section anchor, item boundaries are aligned so Item 1 and Item 2 represent the same combined section.
-- Terminal marker rule: cut when `None.` / `Not applicable.` appears first after item title; do not cut when it appears later in item text.
+- `--task structure` reuses existing `*_item.json` when possible.
+- 10-Q scope now includes both Part I and Part II items. To avoid collisions, 10-Q item keys are part-qualified:
+  - `I_1`, `I_2`, `I_3`, `I_4`
+  - `II_1`, `II_1A`, `II_2`, `II_3`, `II_4`, `II_5`, `II_6`
 
 ## Stats / Reporting
 
-`script/stat.py` generates per-year markdown reports (no CSV outputs).
+`script/stat.py` generates per-year markdown reports.
 
 Outputs:
 - `stats/extraction_stat_<year>_<timestamp>.md`
@@ -161,14 +164,6 @@ python script/stat.py --folder sec_filings
 python script/stat.py --folder sec_filings --year 2024
 ```
 
-Each report includes:
-- Yearly TOC/item coverage stats
-- Per-item coverage and length stats (avg/min/max word count)
-- Structure stats (headings/bodies/depth/ratios)
-- Filings with item errors (error counts by message)
-- Filings missing expected items (missing counts by item)
-- Filings missing TOC (CIK list)
-
 ## Validation
 
 Boundary-focused validator:
@@ -177,7 +172,7 @@ Boundary-focused validator:
 python tests/validate_extraction.py --filing_dir sec_filings --filing 10-K --year 2024 --limit 20
 ```
 
-This compares extracted `text_content` against source HTML segments using first/last word windows and writes:
+This compares extracted `text_content` against source HTML segments and writes:
 - `logs/extraction_validation_<timestamp>.csv`
 - `stats/extraction_validation_<timestamp>.md`
 
@@ -186,5 +181,3 @@ This compares extracted `text_content` against source HTML segments using first/
 - `docs/downloader-technical.md`
 - `docs/item-extraction-technical.md`
 - `docs/structure-extraction-technical.md`
-
-These docs explain implementation details, decision logic, and resolved edge cases in plain language.

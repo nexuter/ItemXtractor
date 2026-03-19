@@ -1,28 +1,31 @@
 # Downloader Technical Guide
 
-This document explains how `script/downloader.py` works, why it is implemented this way, and what edge cases it handles.
+This document explains how `script/downloader.py` works after the submission-text refactor.
 
 ## Purpose
 
-Downloader fetches SEC filings from EDGAR and stores them in a fiscal-year-oriented folder structure.
+Downloader fetches SEC submission `.txt` files from EDGAR and stores them in a fiscal-year-oriented folder structure.
 
 It is designed for two use cases:
-- Real download mode
-- List-only validation mode (`--list-only`)
+- real download mode
+- list-only validation mode (`--list-only`)
 
-## Core Idea: Dual Dating
+## Core Idea: Filing Date Plus Report Period
 
-A filing has at least two important dates:
-- Filing date (when it was filed to EDGAR)
-- Report period / fiscal-year metadata (what year the report belongs to)
+A filing has two separate pieces of timing information:
+- filing date: when EDGAR received the filing
+- report period: which fiscal period the filing belongs to
 
-If you only use filing date year, fiscal-year analysis is biased. Many companies file year-end reports in the next calendar year.
+The downloader now treats both as required checks:
 
-Downloader solves this by:
-1. Finding candidate records from EDGAR full index using filing-date windows.
-2. Downloading candidate filing HTML.
-3. Reading fiscal metadata in filing content.
-4. Keeping only records whose fiscal year matches target `--year`.
+1. use filing date to build the candidate pool through a configurable lookahead window
+2. download the submission `.txt`
+3. read `PERIOD OF REPORT` / `CONFORMED PERIOD OF REPORT` from the submission header
+4. keep the filing only if:
+   - the extracted fiscal year is in the requested `--year` set
+   - the filing date also falls inside that extracted fiscal year's lookahead window
+
+This prevents a filing from being accepted just because it was in a broad initial candidate window.
 
 ## Input and Candidate Selection
 
@@ -31,41 +34,62 @@ Downloader solves this by:
 - `--filing`: filing type code (`10k`, `10q`, etc.)
 - `--year`: target fiscal years
 - `--lookahead_months`: filing-date window extension (default 12)
-- Optional company filters: `--ticker` or `--cik`
+- optional company filters: `--ticker` or `--cik`
 
 ### Candidate pool
 
 For each fiscal year `Y`, downloader considers filing-date windows from:
-- `Y-01-01` to `Y + lookahead_months`
+- `Y-01-01`
+- through `Y + lookahead_months`
 
-It loads full-index years required by those windows, deduplicates by accession, and filters records by date window and optional company filter.
+It loads the needed EDGAR full-index years, deduplicates by accession, and filters records by filing date and optional company filter.
 
-## Fiscal-Year Validation
+## Submission Download Strategy
 
-After downloading a candidate filing, downloader extracts:
-- `dei:DocumentFiscalYearFocus`
-- `dei:DocumentPeriodEndDate`
+For each surviving candidate accession, downloader performs one EDGAR content request:
 
-Rules:
-- Prefer fiscal-year field when available.
-- If missing, infer from period-end year.
-- Keep the filing only if fiscal year is in target `--year`.
+- download the submission text:
+  - `.../{accession}.txt`
+
+The submission `.txt` is the canonical artifact now. The downloader no longer fetches filing HTML first and no longer depends on iXBRL namespace tags for fiscal-year classification.
+
+## Report-Period Extraction
+
+Fiscal-year validation is driven by the submission header line:
+
+- `CONFORMED PERIOD OF REPORT: YYYYMMDD`
+- `PERIOD OF REPORT: YYYYMMDD`
+
+The matcher is intentionally permissive about separators and small label variations, so it can catch forms such as:
+
+- `CONFORMED PERIOD OF REPORT`
+- `PERIOD OF REPORT`
+- `CONFORMED_PERIOD_OF_REPORT`
+- `PERIOD-OF-REPORT`
+
+If no usable report-period header is found, the filing is counted as `missing_fiscal_metadata`.
 
 ## Output Structure
 
 ```text
 {output_dir}/{cik}/{fiscal_year}/{filing}/
-  {cik}_{fiscal_year}_{filing}.htm|html
+  {cik}_{fiscal_year}_{filing}.txt
   {cik}_{fiscal_year}_{filing}_meta.json
 ```
 
-Meta JSON includes source info, accession, filing date, period_of_report, and extracted DEI tags.
+Meta JSON includes:
+- source info
+- accession number
+- filing date
+- `period_of_report`
+- `tags_found`
+- ticker symbols found in the submission text
 
 ## Progress and Runtime Visibility
 
 Downloader prints:
-- Per-iteration result lines
-- Running progress with elapsed / expected time / ETA
+- per-iteration result lines
+- running progress with elapsed time / expected total / ETA
 
 Per-iteration examples:
 - `result=downloaded`
@@ -82,9 +106,6 @@ Generates:
 - `logs/list_only_<form>_<timestamp>.csv`
 - `stats/list_only_<form>_<timestamp>.md`
 
-The markdown includes a note:
-- `search filings looking ahead {lookahead_months} months`
-
 ### Download mode
 
 Generates:
@@ -100,7 +121,7 @@ Per-year metrics include:
 
 ## CIK-Ticker Mapping
 
-Downloader updates annual mapping files for extractor filtering:
+Downloader updates:
 - `_meta/cik_ticker_map_edgar.csv`
 - `_meta/cik_ticker_map.csv` (legacy-compatible)
 
@@ -113,22 +134,23 @@ Fields:
 
 ## Practical Considerations
 
+### Why the submission `.txt` is the canonical download
+
+The EDGAR full index already points to the submission text path. Using that file:
+- reduces SEC requests compared with detail-page then HTML download flow
+- keeps the SEC header and all attached documents together
+- lets the extractor later choose the primary filing HTML from the saved submission container
+
 ### SEC request policy
 
-EDGAR access should respect SEC rate guidance. In code, request pacing is controlled by:
+EDGAR access pacing is still controlled by:
 - `script/config.py` `REQUEST_DELAY`
 - `REQUEST_TIMEOUT`
 
-`REQUEST_DELAY` controls request rate; timeout prevents hanging requests.
-
-### Why list-only exists
-
-For large runs, list-only mode lets you verify candidate volume and yearly counts before spending hours on downloads.
-
 ## Known Limitations
 
-- Fiscal metadata is extracted from filing HTML. If not present/usable, those records are counted as missing metadata and not assigned to target fiscal year.
-- EDGAR filings can have format variability; retries and boundary checks reduce, but do not eliminate, occasional failures.
+- Fiscal-year assignment now depends on report-period header availability in the submission text. If the header is absent or malformed, the filing is not assigned.
+- The downloader does not inspect document narrative text or iXBRL date tags as fallback anymore.
 
 ## Typical Commands
 

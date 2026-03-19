@@ -39,18 +39,24 @@ class SECIndexParser:
         """
         url = f"{SEC_BASE_URL}/Archives/edgar/full-index/{year}/QTR{quarter}/company.idx"
         
-        try:
-            time.sleep(REQUEST_DELAY)  # Rate limiting
-            response = self.session.get(url, timeout=REQUEST_TIMEOUT)
-            response.raise_for_status()
-            return response.text
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 404:
-                # Quarter might not be available yet
-                return ""
-            raise Exception(f"Failed to download index for {year} Q{quarter}: {str(e)}")
-        except Exception as e:
-            raise Exception(f"Failed to download index for {year} Q{quarter}: {str(e)}")
+        last_err = None
+        for attempt in range(6):
+            try:
+                time.sleep(max(REQUEST_DELAY, 0.5) * (attempt + 1))
+                response = self.session.get(url, timeout=REQUEST_TIMEOUT)
+                # 404 means quarter likely unavailable.
+                if response.status_code == 404:
+                    return ""
+                # SEC can return throttling/service errors transiently.
+                if response.status_code in {403, 429, 500, 502, 503, 504}:
+                    last_err = f"{response.status_code} {response.reason}"
+                    continue
+                response.raise_for_status()
+                return response.text
+            except Exception as e:
+                last_err = str(e)
+                continue
+        raise Exception(f"Failed to download index for {year} Q{quarter}: {last_err}")
     
     def _parse_index_file(self, content: str, filing_type: str) -> List[Dict[str, str]]:
         """
@@ -90,20 +96,22 @@ class SECIndexParser:
                 date_filed = parts[3].strip()
                 file_name = parts[4].strip()
             else:
-                # Fixed-width format (older indices)
-                # Approximate column positions based on SEC format
-                # Company Name: 0-62, Form Type: 62-74, CIK: 74-86, Date Filed: 86-98, File Name: 98+
-                if len(line) < 98:
+                # Fixed-width format:
+                # Parse from right side to avoid brittle column offsets.
+                # Expected tail tokens: <CIK> <YYYY-MM-DD> <file_name>
+                # and form type is the last token in the left remainder.
+                tokens = line.rsplit(maxsplit=3)
+                if len(tokens) < 4:
                     continue
-                
-                company_name = line[0:62].strip()
-                form_type = line[62:74].strip()
-                cik = line[74:86].strip()
-                date_filed = line[86:98].strip()
-                file_name = line[98:].strip()
+                left, cik, date_filed, file_name = tokens
+                left_parts = left.rsplit(maxsplit=1)
+                if len(left_parts) < 2:
+                    continue
+                company_name, form_type = left_parts[0].strip(), left_parts[1].strip()
             
-            # Filter by filing type
-            if form_type == filing_type:
+            # Normalize and filter by filing type
+            form_type = form_type.upper().strip()
+            if form_type == filing_type.upper().strip():
                 accession = self._extract_accession_from_file_name(file_name)
                 # Normalize CIK (remove leading zeros for consistency)
                 cik_normalized = cik.lstrip('0') or '0'

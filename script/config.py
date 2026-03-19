@@ -46,10 +46,17 @@ ITEMS_10K = {
 
 # Item Mappings for 10-Q
 ITEMS_10Q = {
-    "1": "Financial Statements",
-    "2": "Management's Discussion and Analysis",
-    "3": "Quantitative and Qualitative Disclosures About Market Risk",
-    "4": "Controls and Procedures",
+    "I_1": "Financial Statements",
+    "I_2": "Management's Discussion and Analysis",
+    "I_3": "Quantitative and Qualitative Disclosures About Market Risk",
+    "I_4": "Controls and Procedures",
+    "II_1": "Legal Proceedings",
+    "II_1A": "Risk Factors",
+    "II_2": "Unregistered Sales of Equity Securities and Use of Proceeds",
+    "II_3": "Defaults Upon Senior Securities",
+    "II_4": "Mine Safety Disclosures",
+    "II_5": "Other Information",
+    "II_6": "Exhibits",
 }
 
 # Request Settings

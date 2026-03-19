@@ -41,6 +41,76 @@ class SECParser:
         # Fallback window when no explicit TOC marker exists.
         self.toc_fallback_prefix_length = 800000
 
+    def _item_key(self, item_number: str, filing_type: str, part: Optional[str]) -> str:
+        token = (item_number or "").strip().upper()
+        filing = (filing_type or "").upper().strip()
+        normalized_part = self._normalize_part(part)
+        if filing in {"10-Q", "10-QA", "10-Q/A"} and normalized_part in {"I", "II"}:
+            return f"{normalized_part}_{token}"
+        return token
+
+    def _bare_item_key(self, item_key: str) -> str:
+        token = (item_key or "").strip().upper()
+        if re.match(r"^[IVX]+_[0-9]", token):
+            return token.split("_", 1)[1]
+        return token
+
+    def _normalize_part(self, text: Optional[str]) -> Optional[str]:
+        if not text:
+            return None
+        match = re.search(r"\bPART\s+([IVXLC]+)\b", text, flags=re.IGNORECASE)
+        return match.group(1).upper() if match else None
+
+    def _part_from_tag_context(self, tag: Optional[Tag]) -> Optional[str]:
+        node = tag
+        steps = 0
+        while node is not None and steps < 30:
+            text = self._clean_text(node.get_text(" ", strip=True))
+            part = self._normalize_part(text)
+            if part:
+                return part
+            prev = node.find_previous(["tr", "p", "div", "td", "li", "h1", "h2", "h3", "h4"])
+            if prev is None or prev == node:
+                break
+            prev_text = self._clean_text(prev.get_text(" ", strip=True))
+            part = self._normalize_part(prev_text)
+            if part:
+                return part
+            node = prev
+            steps += 1
+        return None
+
+    def _finalize_toc_items(
+        self,
+        toc_items: Dict[str, Dict[str, str]],
+        filing_type: str,
+    ) -> Dict[str, Dict[str, str]]:
+        filing = (filing_type or "").upper().strip()
+        if filing not in {"10-Q", "10-QA", "10-Q/A"}:
+            return toc_items
+
+        normalized: Dict[str, Dict[str, str]] = {}
+        current_part: Optional[str] = None
+        for key, value in toc_items.items():
+            title = value.get("title", "")
+            explicit_part = self._normalize_part(key) or self._normalize_part(title)
+            bare_key = self._bare_item_key(key)
+
+            if explicit_part in {"I", "II"}:
+                current_part = explicit_part
+            elif current_part is None:
+                if bare_key in {"1A", "5", "6"}:
+                    current_part = "II"
+                elif bare_key in {"1", "2", "3", "4"}:
+                    current_part = "I"
+
+            final_key = self._item_key(bare_key, filing_type, current_part)
+            if final_key in normalized and normalized[final_key].get("anchor"):
+                continue
+            normalized[final_key] = value
+
+        return normalized
+
     def _clean_text(self, text: str) -> str:
         """
         Clean text by removing extra whitespace
@@ -226,8 +296,12 @@ class SECParser:
         # Process all rows
         rows = table.find_all('tr')
         
+        current_part: Optional[str] = None
         for row in rows:
             row_text = self._clean_text(row.get_text())
+            row_part = self._normalize_part(row_text)
+            if row_part:
+                current_part = row_part
             item_numbers = self._extract_item_numbers(row_text)
             if not item_numbers:
                 item_number = self._extract_item_number(row_text)
@@ -254,13 +328,14 @@ class SECParser:
                     title = ""
 
                 for item_number in item_numbers:
-                    existing = toc_items.get(item_number)
+                    item_key = self._item_key(item_number, filing_type, current_part or row_text)
+                    existing = toc_items.get(item_key)
                     # Never overwrite anchored entry with unanchored entry.
                     if existing and existing.get('anchor') and not anchor:
                         continue
                     if existing and existing.get('anchor') and anchor:
                         continue
-                    toc_items[item_number] = {
+                    toc_items[item_key] = {
                         'anchor': anchor,
                         'title': title if title else f'Item {item_number}'
                     }
@@ -285,11 +360,15 @@ class SECParser:
         max_items_to_find = 20  # Set a reasonable limit
         headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'div'], limit=200)
         
+        current_part: Optional[str] = None
         for heading in headings:
             if len(toc_items) >= max_items_to_find:
                 break
                 
             text = self._clean_text(heading.get_text())
+            heading_part = self._normalize_part(text)
+            if heading_part:
+                current_part = heading_part
             item_number = self._extract_item_number(text)
             
             if item_number:
@@ -318,15 +397,16 @@ class SECParser:
                         if abs(heading.sourceline - prev.sourceline) < 10:
                             anchor = prev['name']
                 
-                if item_number not in toc_items or not toc_items[item_number].get('anchor'):
-                    toc_items[item_number] = {
+                item_key = self._item_key(item_number, filing_type, current_part or text)
+                if item_key not in toc_items or not toc_items[item_key].get('anchor'):
+                    toc_items[item_key] = {
                         'anchor': anchor,
                         'title': self._clean_item_title(text)
                     }
         
         return toc_items
 
-    def _parse_toc_from_links(self, soup: BeautifulSoup) -> Dict[str, Dict[str, str]]:
+    def _parse_toc_from_links(self, soup: BeautifulSoup, filing_type: str) -> Dict[str, Dict[str, str]]:
         """
         Parse TOC from anchor links (common in inline-XBRL filings where TOC is
         represented as linked item labels instead of a clean table).
@@ -385,11 +465,13 @@ class SECParser:
             if not item_numbers:
                 continue
 
+            part = self._normalize_part(context_text) or self._part_from_tag_context(chosen_context or link)
             for item_number in item_numbers:
-                existing = toc_items.get(item_number)
+                item_key = self._item_key(item_number, filing_type, part)
+                existing = toc_items.get(item_key)
                 if existing and existing.get("anchor"):
                     continue
-                toc_items[item_number] = {
+                toc_items[item_key] = {
                     "anchor": anchor,
                     "title": self._clean_item_title(title_text),
                 }
@@ -437,7 +519,7 @@ class SECParser:
             toc_items = self._parse_toc_from_table(toc_table, filing_type)
             if toc_items and len(toc_items) >= 2:
                 # Enrich table-derived TOC with link-derived anchors/titles.
-                linked_items = self._parse_toc_from_links(soup)
+                linked_items = self._parse_toc_from_links(soup, filing_type)
                 for k, v in linked_items.items():
                     if k not in toc_items:
                         toc_items[k] = v
@@ -451,33 +533,33 @@ class SECParser:
                     # Enrich once with a broader prefix scan to recover edge rows
                     # not present in the immediate TOC marker region.
                     broad_soup = BeautifulSoup(html_content[: self.toc_fallback_prefix_length], "html.parser")
-                    broad_items = self._parse_toc_from_links(broad_soup)
+                    broad_items = self._parse_toc_from_links(broad_soup, filing_type)
                     toc_items = _merge_missing(toc_items, broad_items)
-                    return toc_items
+                    return self._finalize_toc_items(toc_items, filing_type)
 
         # Try parsing linked TOC entries from the TOC region.
-        toc_items = self._parse_toc_from_links(soup)
+        toc_items = self._parse_toc_from_links(soup, filing_type)
         anchored_count = sum(1 for v in toc_items.values() if v.get("anchor"))
         if toc_items and len(toc_items) >= 5 and anchored_count >= 5:
             broad_soup = BeautifulSoup(html_content[: self.toc_fallback_prefix_length], "html.parser")
-            broad_items = self._parse_toc_from_links(broad_soup)
+            broad_items = self._parse_toc_from_links(broad_soup, filing_type)
             toc_items = _merge_missing(toc_items, broad_items)
-            return toc_items
+            return self._finalize_toc_items(toc_items, filing_type)
  
         # Some filings place index/TOC links outside the immediate TOC marker
         # region (e.g., repeated page headers with linked ITEM anchors).
         # Fallback to a larger prefix scan, then full-document link scan.
         broad_soup = BeautifulSoup(html_content[: self.toc_fallback_prefix_length], "html.parser")
-        toc_items = self._parse_toc_from_links(broad_soup)
+        toc_items = self._parse_toc_from_links(broad_soup, filing_type)
         anchored_count = sum(1 for v in toc_items.values() if v.get("anchor"))
         if toc_items and len(toc_items) >= 5 and anchored_count >= 5:
-            return toc_items
+            return self._finalize_toc_items(toc_items, filing_type)
 
         full_soup = BeautifulSoup(html_content, "html.parser")
-        toc_items = self._parse_toc_from_links(full_soup)
+        toc_items = self._parse_toc_from_links(full_soup, filing_type)
         anchored_count = sum(1 for v in toc_items.values() if v.get("anchor"))
         if toc_items and len(toc_items) >= 5 and anchored_count >= 5:
-            return toc_items
+            return self._finalize_toc_items(toc_items, filing_type)
 
         # If no explicit marker exists, do not perform loose structure fallback.
         if not has_explicit_marker:
@@ -488,7 +570,7 @@ class SECParser:
         
         # Only return if we found at least 2 items
         if len(toc_items) >= 2:
-            return toc_items
+            return self._finalize_toc_items(toc_items, filing_type)
         
         return None
     
@@ -581,6 +663,7 @@ class SECParser:
             return tag_open if tag_open != -1 else candidate
         
         for i, item_num in enumerate(sorted_items):
+            bare_item_num = self._bare_item_key(item_num)
             anchor = toc_items[item_num].get('anchor')
             
             # Find the element with this anchor
@@ -614,7 +697,7 @@ class SECParser:
                         break
                 lo = 0 if prev_anchor_pos == -1 else prev_anchor_pos
                 hi = next_anchor_pos
-                start_pos = _find_item_heading_start(item_num, lo, hi)
+                start_pos = _find_item_heading_start(bare_item_num, lo, hi)
 
             if start_pos != -1:
                 # Find end position (next item or end of document)
@@ -662,7 +745,11 @@ class SECParser:
                         # Use only the immediate next TOC item for boundary.
                         # Scanning all future items can truncate early on
                         # in-text references (e.g., "see Item 8") inside current item.
-                        heading_pos = _find_item_heading_start(next_item, start_pos + 1, hi)
+                        heading_pos = _find_item_heading_start(
+                            self._bare_item_key(next_item),
+                            start_pos + 1,
+                            hi,
+                        )
                         if heading_pos != -1:
                             end_pos = heading_pos
                         elif hi != len(html_content):
@@ -702,5 +789,3 @@ class SECParser:
                 positions[item_num] = (start_pos, end_pos)
         
         return positions
-
-

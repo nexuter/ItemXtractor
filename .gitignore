@@ -35,6 +35,7 @@ env/
 
 # SEC Filings Data
 sec_filings/
+sec_filings_/
 
 # Logs
 *.log
