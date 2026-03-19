@@ -96,18 +96,32 @@ class SECIndexParser:
                 date_filed = parts[3].strip()
                 file_name = parts[4].strip()
             else:
-                # Fixed-width format:
-                # Parse from right side to avoid brittle column offsets.
-                # Expected tail tokens: <CIK> <YYYY-MM-DD> <file_name>
-                # and form type is the last token in the left remainder.
-                tokens = line.rsplit(maxsplit=3)
-                if len(tokens) < 4:
-                    continue
-                left, cik, date_filed, file_name = tokens
-                left_parts = left.rsplit(maxsplit=1)
-                if len(left_parts) < 2:
-                    continue
-                company_name, form_type = left_parts[0].strip(), left_parts[1].strip()
+                # Fixed-width format. Prefer SEC's standard column boundaries so
+                # multi-token form types such as "NT 10-K" stay intact.
+                company_name = line[0:62].strip() if len(line) >= 62 else ""
+                form_type = line[62:74].strip() if len(line) >= 74 else ""
+                cik = line[74:86].strip() if len(line) >= 86 else ""
+                date_filed = line[86:98].strip() if len(line) >= 98 else ""
+                file_name = line[98:].strip() if len(line) > 98 else ""
+
+                valid_fixed_width = (
+                    bool(company_name)
+                    and bool(form_type)
+                    and bool(re.fullmatch(r"\d+", cik))
+                    and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_filed))
+                    and bool(file_name)
+                )
+                if not valid_fixed_width:
+                    # Fallback for non-standard rows:
+                    # Expected tail tokens: <CIK> <YYYY-MM-DD> <file_name>
+                    tokens = line.rsplit(maxsplit=3)
+                    if len(tokens) < 4:
+                        continue
+                    left, cik, date_filed, file_name = tokens
+                    left_parts = left.rsplit(maxsplit=1)
+                    if len(left_parts) < 2:
+                        continue
+                    company_name, form_type = left_parts[0].strip(), left_parts[1].strip()
             
             # Normalize and filter by filing type
             form_type = form_type.upper().strip()
