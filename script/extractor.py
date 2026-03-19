@@ -9,11 +9,11 @@ Reads downloaded SEC submission .txt files from filing_dir and performs:
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -29,6 +29,7 @@ from src.parser import SECParser
 from src.structure_extractor import StructureExtractor
 from src.submission_parser import (
     build_document_lookup,
+    extract_trading_symbols,
     resolve_image_document,
     select_primary_html_document,
     parse_submission_documents,
@@ -62,24 +63,8 @@ def _item_sort_key(item_num: str) -> tuple[int, int, str]:
     return (part_rank, int(bare[:i]), bare[i:])
 
 
-def _load_cik_ticker_map(map_path: Path) -> Dict[str, set[str]]:
-    out: Dict[str, set[str]] = {}
-    if not map_path.exists():
-        return out
-    with map_path.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        for r in reader:
-            ticker = str(r.get("ticker", "")).strip().upper()
-            cik = str(r.get("cik", "")).strip().zfill(10)
-            if not ticker or not cik:
-                continue
-            out.setdefault(ticker, set()).add(cik)
-    return out
-
-
 def _resolve_ciks_from_args(
     filing_dir: Path,
-    tickers: Optional[List[str]],
     ciks: Optional[List[str]],
 ) -> set[str]:
     target_ciks: set[str] = set()
@@ -87,19 +72,85 @@ def _resolve_ciks_from_args(
         token = c.strip()
         if token:
             target_ciks.add(token.zfill(10))
-
-    if tickers:
-        source_map = filing_dir / "_meta" / "cik_ticker_map_edgar.csv"
-        legacy_map = filing_dir / "_meta" / "cik_ticker_map.csv"
-        ticker_map = _load_cik_ticker_map(source_map)
-        if not ticker_map and legacy_map.exists():
-            ticker_map = _load_cik_ticker_map(legacy_map)
-        for t in tickers:
-            sym = t.strip().upper()
-            if not sym:
-                continue
-            target_ciks.update(ticker_map.get(sym, set()))
     return target_ciks
+
+
+def _load_cik_ticker_rows(map_path: Path) -> Dict[tuple[str, str], Dict[str, str]]:
+    rows: Dict[tuple[str, str], Dict[str, str]] = {}
+    if not map_path.exists():
+        return rows
+    with map_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            year = str(r.get("fiscal_year", "")).strip()
+            cik = str(r.get("cik", "")).strip().zfill(10)
+            ticker = str(r.get("ticker", "")).strip().upper()
+            if not year or not cik or not ticker:
+                continue
+            rows[(year, cik)] = {
+                "fiscal_year": year,
+                "cik": cik,
+                "ticker": ticker,
+                "source": str(r.get("source", "")).strip() or "extractor",
+                "updated_at": str(r.get("updated_at", "")).strip(),
+            }
+    return rows
+
+
+def _save_cik_ticker_rows(map_path: Path, rows: Dict[tuple[str, str], Dict[str, str]]) -> None:
+    map_path.parent.mkdir(parents=True, exist_ok=True)
+    ordered = sorted(rows.values(), key=lambda r: (r["fiscal_year"], r["cik"]))
+    with map_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["fiscal_year", "cik", "ticker", "source", "updated_at"],
+        )
+        writer.writeheader()
+        writer.writerows(ordered)
+
+
+def _extract_ixbrl_tickers(html_content: str) -> List[str]:
+    if "dei:TradingSymbol" not in (html_content or ""):
+        return []
+    return extract_trading_symbols(html_content)
+
+
+def _update_meta_tickers(
+    *,
+    txt_path: Path,
+    tickers: List[str],
+) -> None:
+    meta_path = txt_path.with_name(f"{txt_path.stem}_meta.json")
+    if not meta_path.exists():
+        return
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    payload["ticker_symbols"] = list(tickers)
+    meta_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _upsert_ticker_map(
+    *,
+    filing_dir: Path,
+    cik: str,
+    year: str,
+    ticker: Optional[str],
+) -> None:
+    token = (ticker or "").strip().upper()
+    if not token:
+        return
+    map_path = filing_dir / "_meta" / "cik_ticker_map.csv"
+    rows = _load_cik_ticker_rows(map_path)
+    rows[(year, cik.zfill(10))] = {
+        "fiscal_year": year,
+        "cik": cik.zfill(10),
+        "ticker": token,
+        "source": "extractor",
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    _save_cik_ticker_rows(map_path, rows)
 
 
 def _list_filing_files(
@@ -236,6 +287,14 @@ def _extract_items_for_file(
 
     meta = context["meta"]
     filing_type = str(meta["filing"]).upper()
+    tickers = _extract_ixbrl_tickers(html_content)
+    _update_meta_tickers(txt_path=txt_path, tickers=tickers)
+    _upsert_ticker_map(
+        filing_dir=filing_dir,
+        cik=str(meta["cik"]),
+        year=str(meta["year"]),
+        ticker=tickers[0] if tickers else None,
+    )
     toc_items = parser.parse_toc(html_content, filing_type)
     if not toc_items:
         return None
@@ -298,6 +357,15 @@ def _extract_structure_for_file(
         return None
     if save_html:
         _save_extracted_html(txt_path, str(context["html_content"]), overwrite)
+    meta = context["meta"]
+    tickers = _extract_ixbrl_tickers(str(context["html_content"]))
+    _update_meta_tickers(txt_path=txt_path, tickers=tickers)
+    _upsert_ticker_map(
+        filing_dir=filing_dir,
+        cik=str(meta["cik"]),
+        year=str(meta["year"]),
+        ticker=tickers[0] if tickers else None,
+    )
 
     item_out = txt_path.with_name(f"{base_name}_item.json")
     item_payload = None
@@ -357,7 +425,6 @@ def _extract_structure_for_file(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Extract items or structures from downloaded SEC submission text files.")
-    parser.add_argument("--ticker", nargs="+", dest="tickers", default=None, help="Ticker symbol filter(s).")
     parser.add_argument("--cik", nargs="+", dest="ciks", default=None, help="CIK folder filter(s).")
     parser.add_argument("--filing", default=None, help="Filing folder filter (e.g., 10-K).")
     parser.add_argument("--year", nargs="+", dest="years", default=None, help="Year folder filter(s), e.g. 2023 2024.")
@@ -382,13 +449,8 @@ def main() -> None:
     item_extractor = ItemExtractor()
     structure_extractor = StructureExtractor()
 
-    target_ciks = _resolve_ciks_from_args(filing_dir, args.tickers, args.ciks)
+    target_ciks = _resolve_ciks_from_args(filing_dir, args.ciks)
     year_filter = {str(y).strip() for y in (args.years or []) if str(y).strip()}
-    if args.tickers and not target_ciks and not args.ciks:
-        print(
-            "No CIK match found for provided ticker(s) in "
-            "filing_dir/_meta/cik_ticker_map_edgar.csv"
-        )
 
     submission_files = _list_filing_files(
         filing_dir,

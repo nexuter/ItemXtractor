@@ -58,16 +58,16 @@ def extract_period_of_report(submission_text: str) -> Tuple[Optional[str], Optio
 
 
 def extract_trading_symbols(text: str) -> List[str]:
-    symbols = re.findall(
-        r'name="dei:TradingSymbol"[^>]*>\s*([A-Za-z0-9.\-]+)\s*<',
-        text or "",
-        flags=re.IGNORECASE,
-    )
     out: List[str] = []
     seen = set()
-    for sym in symbols:
-        token = sym.strip().upper()
-        if token and token not in seen:
+    for match in re.finditer(
+        r'name\s*=\s*["\']dei:TradingSymbol["\'][^>]*>(.*?)</',
+        text or "",
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        raw = re.sub(r"<[^>]+>", " ", match.group(1))
+        token = " ".join(raw.split()).strip().upper()
+        if token and re.fullmatch(r"[A-Z0-9.\-]+", token) and token not in seen:
             seen.add(token)
             out.append(token)
     return out

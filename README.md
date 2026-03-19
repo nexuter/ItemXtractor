@@ -16,7 +16,7 @@ Current architecture is split by step:
 2. Download the SEC submission `.txt` for each candidate accession.
 3. Read `PERIOD OF REPORT` from the submission header to identify the filing fiscal year.
 4. Keep only filings whose fiscal year is requested and whose filing date fits that fiscal year's lookahead window.
-5. During extraction, parse `<DOCUMENT>` blocks inside the saved submission `.txt`, choose the primary filing HTML, and run TOC-driven item/structure extraction.
+5. During extraction, parse `<DOCUMENT>` blocks inside the saved submission `.txt`, choose the primary filing HTML, backfill ticker info only when iXBRL `dei:TradingSymbol` is present, and run TOC-driven item/structure extraction.
 
 ## Folder Layout
 
@@ -43,6 +43,12 @@ Optional extractor artifacts:
   {item}_{index}.{ext}
 ```
 
+Extractor-managed ticker map:
+
+```text
+{output_dir}/_meta/cik_ticker_map.csv
+```
+
 ## Install
 
 ```bash
@@ -54,7 +60,7 @@ pip install -r requirements.txt
 `script/downloader.py` is EDGAR-only.
 
 ```text
-usage: downloader.py [-h] [--ticker TICKERS [TICKERS ...] | --cik CIKS [CIKS ...]]
+usage: downloader.py [-h] [--cik CIKS [CIKS ...]]
                      --filing FILING
                      --year YEARS [YEARS ...]
                      --output_dir OUTPUT_DIR
@@ -90,9 +96,6 @@ python script/downloader.py --filing 10k --year 2023 2024 --output_dir sec_filin
 
 ### Downloader outputs
 
-- Mapping tables:
-  - `sec_filings/_meta/cik_ticker_map_edgar.csv`
-  - `sec_filings/_meta/cik_ticker_map.csv` (legacy-compatible)
 - List-only reports:
   - `logs/list_only_<form>_<timestamp>.csv`
   - `stats/list_only_<form>_<timestamp>.md`
@@ -106,7 +109,6 @@ python script/downloader.py --filing 10k --year 2023 2024 --output_dir sec_filin
 
 ```text
 usage: extractor.py [-h]
-                    [--ticker TICKERS [TICKERS ...]]
                     [--cik CIKS [CIKS ...]]
                     [--filing FILING]
                     [--year YEARS [YEARS ...]]
@@ -141,6 +143,8 @@ python script/extractor.py --filing_dir sec_filings --filing 10-Q --task item --
 ### Notes
 
 - The extractor parses SEC `<DOCUMENT>` blocks and selects the main filing HTML from the submission container.
+- Ticker mapping is extractor-owned. It only backfills `cik_ticker_map.csv` and `ticker_symbols` in filing metadata when `dei:TradingSymbol` exists in the selected filing HTML.
+- Non-iXBRL filings are skipped for ticker extraction.
 - TOC detection is still required. If no TOC is found, extraction for that filing is skipped.
 - Extraction only keeps regulated item scope from `script/config.py`.
 - Existing output files are skipped unless `--overwrite` is set.
@@ -163,6 +167,10 @@ Run:
 python script/stat.py --folder sec_filings
 python script/stat.py --folder sec_filings --year 2024
 ```
+
+The report now includes ticker coverage:
+- how many filings have at least one ticker in `*_meta.json`
+- yearly ticker percentage across all filings in scope
 
 ## Validation
 

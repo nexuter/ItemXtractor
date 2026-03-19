@@ -50,6 +50,19 @@ The main filing HTML is selected by scoring document candidates using:
 - HTML-like filename
 - HTML-like payload content
 
+## Ticker Mapping Strategy
+
+Ticker extraction is now owned by the extractor, not the downloader.
+
+Rules:
+- inspect only the selected primary filing HTML
+- extract ticker only when iXBRL `dei:TradingSymbol` is present
+- update filing `_meta.json` `ticker_symbols`
+- upsert `filing_dir/_meta/cik_ticker_map.csv`
+- if the filing is non-iXBRL or does not expose `dei:TradingSymbol`, skip ticker extraction
+
+This keeps ticker mapping tied to parsed filing HTML instead of raw submission text scans.
+
 ## TOC Parsing Strategy
 
 Parser combines multiple methods:
@@ -132,6 +145,10 @@ Supported cases include:
   - `html_content`
   - `text_content`
 
+Related side effects:
+- filing `_meta.json` may gain `ticker_symbols`
+- `filing_dir/_meta/cik_ticker_map.csv` may be created or updated
+
 ## Command Usage
 
 Extract items:
@@ -157,3 +174,4 @@ python script/extractor.py --filing_dir sec_filings --filing 10-Q --task item --
 - It does not download filings.
 - It does not classify fiscal year from document narrative.
 - It does not keep every submission attachment; it only selects the primary filing HTML plus optional image payloads needed by extracted items.
+- It does not force ticker inference for non-iXBRL filings.

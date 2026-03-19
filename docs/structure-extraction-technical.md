@@ -74,6 +74,7 @@ The structure extractor itself still works from item HTML, but that item HTML no
 - submission `.txt`
 - selected filing `<DOCUMENT>`
 - TOC-based item extraction
+- optional extractor-side ticker backfill happens before structure generation when iXBRL `dei:TradingSymbol` is present
 
 So the end structure output is still item-centric, while the input artifact is now the saved submission container rather than a downloaded standalone filing HTML file.
 

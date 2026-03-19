@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.downloader import SECDownloader
 from src.index_parser import SECIndexParser
-from src.submission_parser import extract_period_of_report, extract_trading_symbols
+from src.submission_parser import extract_period_of_report
 
 
 FILING_CODE_MAP: Dict[str, Tuple[str, str]] = {
@@ -272,96 +272,13 @@ def _in_window_for_fiscal_year(filing_date: str, fiscal_year: int, lookahead_mon
     return start <= filed <= end
 
 
-def _normalize_cik_set(
-    downloader: SECDownloader,
-    tickers: Optional[List[str]],
-    ciks: Optional[List[str]],
-) -> Set[str]:
+def _normalize_cik_set(ciks: Optional[List[str]]) -> Set[str]:
     result: Set[str] = set()
     for c in ciks or []:
         token = c.strip()
         if token:
             result.add(token.zfill(10))
-    for t in tickers or []:
-        token = t.strip()
-        if not token:
-            continue
-        if token.isdigit():
-            result.add(token.zfill(10))
-        else:
-            result.add(downloader.get_cik(token))
     return result
-
-
-def _normalize_ticker_input_map(
-    downloader: SECDownloader,
-    tickers: Optional[List[str]],
-) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    for token in tickers or []:
-        t = token.strip()
-        if not t or t.isdigit():
-            continue
-        cik = downloader.get_cik(t)
-        out[cik] = t.upper()
-    return out
-
-
-def _load_cik_ticker_map(path: Path) -> Dict[Tuple[str, str], Dict[str, str]]:
-    rows: Dict[Tuple[str, str], Dict[str, str]] = {}
-    if not path.exists():
-        return rows
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        for r in reader:
-            year = str(r.get("fiscal_year", "")).strip()
-            cik = str(r.get("cik", "")).strip().zfill(10)
-            if not year or not cik:
-                continue
-            rows[(year, cik)] = {
-                "fiscal_year": year,
-                "cik": cik,
-                "ticker": str(r.get("ticker", "")).strip().upper(),
-                "source": "edgar",
-                "updated_at": str(r.get("updated_at", "")).strip(),
-            }
-    return rows
-
-
-def _save_cik_ticker_map(path: Path, rows: Dict[Tuple[str, str], Dict[str, str]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    ordered = sorted(rows.values(), key=lambda r: (r["fiscal_year"], r["cik"]))
-    with path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["fiscal_year", "cik", "ticker", "source", "updated_at"],
-        )
-        writer.writeheader()
-        writer.writerows(ordered)
-
-
-def _upsert_cik_ticker_map(
-    path: Path,
-    *,
-    fiscal_year: int,
-    cik: str,
-    ticker: Optional[str],
-) -> None:
-    if not ticker:
-        return
-    t = ticker.strip().upper()
-    if not t:
-        return
-    rows = _load_cik_ticker_map(path)
-    key = (str(fiscal_year), cik.zfill(10))
-    rows[key] = {
-        "fiscal_year": str(fiscal_year),
-        "cik": cik.zfill(10),
-        "ticker": t,
-        "source": "edgar",
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    _save_cik_ticker_map(path, rows)
 
 
 def _save_filing_and_meta(
@@ -395,15 +312,11 @@ def download_from_edgar(
     fiscal_years: List[int],
     output_dir: Path,
     lookahead_months: int,
-    tickers: Optional[List[str]],
     ciks: Optional[List[str]],
     overwrite: bool,
     user_agent: str,
 ) -> None:
     downloader = SECDownloader(user_agent=user_agent)
-    map_path = output_dir / "_meta" / "cik_ticker_map_edgar.csv"
-    legacy_map_path = output_dir / "_meta" / "cik_ticker_map.csv"
-    input_ticker_by_cik = _normalize_ticker_input_map(downloader, tickers)
 
     if date.today().month <= lookahead_months:
         print(
@@ -411,7 +324,7 @@ def download_from_edgar(
             "Some companies may not have filed latest disclosures yet."
         )
 
-    target_ciks = _normalize_cik_set(downloader, tickers, ciks)
+    target_ciks = _normalize_cik_set(ciks)
     if target_ciks:
         print(f"CIK filter enabled: {len(target_ciks)} target CIK(s)")
     else:
@@ -469,7 +382,6 @@ def download_from_edgar(
             continue
 
         period_of_report, fiscal_year, tags_found = extract_period_of_report(submission_text)
-        symbols = extract_trading_symbols(submission_text)
         if fiscal_year is None:
             stats["missing_fiscal_metadata"] += 1
             for fy in fiscal_years:
@@ -500,7 +412,7 @@ def download_from_edgar(
             "accession_number": accession,
             "source_file_name": record.get("file_name", ""),
             "tags_found": tags_found,
-            "ticker_symbols": symbols,
+            "ticker_symbols": [],
         }
         state = _save_filing_and_meta(
             output_dir=output_dir,
@@ -519,20 +431,6 @@ def download_from_edgar(
             stats["skipped_exists"] += 1
             stats_by_year[fiscal_year]["skipped_exists"] += 1
             print(f"{status_prefix} result=skipped_exists fiscal_year={fiscal_year}")
-
-        preferred_ticker = symbols[0] if symbols else input_ticker_by_cik.get(normalized_cik)
-        _upsert_cik_ticker_map(
-            map_path,
-            fiscal_year=fiscal_year,
-            cik=normalized_cik,
-            ticker=preferred_ticker,
-        )
-        _upsert_cik_ticker_map(
-            legacy_map_path,
-            fiscal_year=fiscal_year,
-            cik=normalized_cik,
-            ticker=preferred_ticker,
-        )
 
         if (i % update_every == 0) or (i == total):
             _report_progress(
@@ -556,9 +454,7 @@ def download_from_edgar(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download filings from EDGAR.")
-    group = parser.add_mutually_exclusive_group(required=False)
-    group.add_argument("--ticker", nargs="+", dest="tickers", help="Ticker(s) to download.")
-    group.add_argument("--cik", nargs="+", dest="ciks", help="CIK(s) to download.")
+    parser.add_argument("--cik", nargs="+", dest="ciks", help="CIK(s) to download.")
     parser.add_argument(
         "--filing",
         required=True,
@@ -595,8 +491,7 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    downloader = SECDownloader(user_agent=args.user_agent)
-    target_ciks = _normalize_cik_set(downloader, args.tickers, args.ciks)
+    target_ciks = _normalize_cik_set(args.ciks)
 
     if args.list_only:
         if target_ciks:
@@ -623,7 +518,6 @@ def main() -> None:
         fiscal_years=fiscal_years,
         output_dir=output_dir,
         lookahead_months=args.lookahead_months,
-        tickers=args.tickers,
         ciks=args.ciks,
         overwrite=args.overwrite,
         user_agent=args.user_agent,

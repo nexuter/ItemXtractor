@@ -101,6 +101,7 @@ def build_report(folder: Path, years: Optional[Set[int]] = None) -> List[Path]:
         "filings_total": 0,
         "filings_toc_found": 0,
         "filings_toc_missing": 0,
+        "filings_with_ticker": 0,
         "filings_with_any_extracted_items": 0,
         "item_json_present": 0,
         "item_json_missing": 0,
@@ -155,8 +156,14 @@ def build_report(folder: Path, years: Optional[Set[int]] = None) -> List[Path]:
         filing_counts[(year, filing)] += 1
 
         base = submission_path.stem
+        meta_path = submission_path.with_name(f"{base}_meta.json")
         item_path = submission_path.with_name(f"{base}_item.json")
         str_path = submission_path.with_name(f"{base}_str.json")
+
+        meta_payload = _load_json(meta_path) or {}
+        tickers = meta_payload.get("ticker_symbols") or []
+        if isinstance(tickers, list) and any(str(t).strip() for t in tickers):
+            y["filings_with_ticker"] += 1
 
         if str_path.exists():
             y["str_json_present"] += 1
@@ -246,15 +253,18 @@ def build_report(folder: Path, years: Optional[Set[int]] = None) -> List[Path]:
     overall_lines.append("")
     overall_lines.append("## Yearly Summary")
     overall_lines.append("")
-    overall_lines.append("| Year | Filings | TOC Found | TOC Missing | Any Items Extracted | Item JSON | Missing Item JSON | Structure JSON | Avg TOC Items | Avg TOC Anchors | Avg Extracted Items | Filings with Item Errors | Filings Missing Expected Items |")
-    overall_lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    overall_lines.append("| Year | Filings | With Ticker | Ticker % | TOC Found | TOC Missing | Any Items Extracted | Item JSON | Missing Item JSON | Structure JSON | Avg TOC Items | Avg TOC Anchors | Avg Extracted Items | Filings with Item Errors | Filings Missing Expected Items |")
+    overall_lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for year in sorted(year_stats.keys()):
         y = year_stats[year]
         denom = max(y["item_json_present"], 1)
+        ticker_pct = (y["filings_with_ticker"] / max(y["filings_total"], 1)) * 100.0
         overall_lines.append(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {:.2f} | {:.2f} | {:.2f} | {} | {} |".format(
+            "| {} | {} | {} | {:.2f} | {} | {} | {} | {} | {} | {} | {:.2f} | {:.2f} | {:.2f} | {} | {} |".format(
                 year,
                 y["filings_total"],
+                y["filings_with_ticker"],
+                ticker_pct,
                 y["filings_toc_found"],
                 y["filings_toc_missing"],
                 y["filings_with_any_extracted_items"],
@@ -286,11 +296,14 @@ def build_report(folder: Path, years: Optional[Set[int]] = None) -> List[Path]:
 
         lines.append("## 1. Item Extraction Summary")
         lines.append("")
-        lines.append("| Filings | TOC Found | TOC Missing | Any Items Extracted | Item JSON | Missing Item JSON | Structure JSON | Avg TOC Items | Avg TOC Anchors | Avg Extracted Items | Filings with Item Errors | Filings Missing Expected Items |")
-        lines.append("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        lines.append("| Filings | With Ticker | Ticker % | TOC Found | TOC Missing | Any Items Extracted | Item JSON | Missing Item JSON | Structure JSON | Avg TOC Items | Avg TOC Anchors | Avg Extracted Items | Filings with Item Errors | Filings Missing Expected Items |")
+        lines.append("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        ticker_pct = (y["filings_with_ticker"] / max(y["filings_total"], 1)) * 100.0
         lines.append(
-            "| {} | {} | {} | {} | {} | {} | {} | {:.2f} | {:.2f} | {:.2f} | {} | {} |".format(
+            "| {} | {} | {:.2f} | {} | {} | {} | {} | {} | {} | {:.2f} | {:.2f} | {:.2f} | {} | {} |".format(
                 y["filings_total"],
+                y["filings_with_ticker"],
+                ticker_pct,
                 y["filings_toc_found"],
                 y["filings_toc_missing"],
                 y["filings_with_any_extracted_items"],

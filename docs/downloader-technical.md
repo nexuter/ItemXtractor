@@ -34,7 +34,7 @@ This prevents a filing from being accepted just because it was in a broad initia
 - `--filing`: filing type code (`10k`, `10q`, etc.)
 - `--year`: target fiscal years
 - `--lookahead_months`: filing-date window extension (default 12)
-- optional company filters: `--ticker` or `--cik`
+- optional company filter: `--cik`
 
 ### Candidate pool
 
@@ -83,7 +83,6 @@ Meta JSON includes:
 - filing date
 - `period_of_report`
 - `tags_found`
-- ticker symbols found in the submission text
 
 ## Progress and Runtime Visibility
 
@@ -118,19 +117,6 @@ Per-year metrics include:
 - missing_fiscal_metadata
 - failed_download
 - skipped_outside_target_fy
-
-## CIK-Ticker Mapping
-
-Downloader updates:
-- `_meta/cik_ticker_map_edgar.csv`
-- `_meta/cik_ticker_map.csv` (legacy-compatible)
-
-Fields:
-- fiscal_year
-- cik
-- ticker
-- source
-- updated_at
 
 ## Practical Considerations
 
