@@ -96,32 +96,47 @@ class SECIndexParser:
                 date_filed = parts[3].strip()
                 file_name = parts[4].strip()
             else:
-                # Fixed-width format. Prefer SEC's standard column boundaries so
-                # multi-token form types such as "NT 10-K" stay intact.
-                company_name = line[0:62].strip() if len(line) >= 62 else ""
-                form_type = line[62:74].strip() if len(line) >= 74 else ""
-                cik = line[74:86].strip() if len(line) >= 86 else ""
-                date_filed = line[86:98].strip() if len(line) >= 98 else ""
-                file_name = line[98:].strip() if len(line) > 98 else ""
+                # Fixed-width-ish format. Some SEC rows drift from the nominal
+                # column offsets, so prefer parsing the tail fields with a
+                # spacing-aware regex to preserve multi-token form types such as
+                # "NT 10-K" and "10-K/A".
+                company_name = ""
+                form_type = ""
+                cik = ""
+                date_filed = ""
+                file_name = ""
 
-                valid_fixed_width = (
-                    bool(company_name)
-                    and bool(form_type)
-                    and bool(re.fullmatch(r"\d+", cik))
-                    and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_filed))
-                    and bool(file_name)
+                row_match = re.match(
+                    r"^(?P<company>.*?\S)\s{2,}"
+                    r"(?P<form>[A-Z0-9][A-Z0-9/\- ]*?)\s{2,}"
+                    r"(?P<cik>\d+)\s{2,}"
+                    r"(?P<date>\d{4}-\d{2}-\d{2})\s{2,}"
+                    r"(?P<file>\S+)\s*$",
+                    line.strip(),
                 )
-                if not valid_fixed_width:
-                    # Fallback for non-standard rows:
-                    # Expected tail tokens: <CIK> <YYYY-MM-DD> <file_name>
-                    tokens = line.rsplit(maxsplit=3)
-                    if len(tokens) < 4:
+                if row_match:
+                    company_name = row_match.group("company").strip()
+                    form_type = row_match.group("form").strip()
+                    cik = row_match.group("cik").strip()
+                    date_filed = row_match.group("date").strip()
+                    file_name = row_match.group("file").strip()
+                else:
+                    # Fall back to SEC's nominal fixed-width columns.
+                    company_name = line[0:62].strip() if len(line) >= 62 else ""
+                    form_type = line[62:74].strip() if len(line) >= 74 else ""
+                    cik = line[74:86].strip() if len(line) >= 86 else ""
+                    date_filed = line[86:98].strip() if len(line) >= 98 else ""
+                    file_name = line[98:].strip() if len(line) > 98 else ""
+
+                    valid_fixed_width = (
+                        bool(company_name)
+                        and bool(form_type)
+                        and bool(re.fullmatch(r"\d+", cik))
+                        and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_filed))
+                        and bool(file_name)
+                    )
+                    if not valid_fixed_width:
                         continue
-                    left, cik, date_filed, file_name = tokens
-                    left_parts = left.rsplit(maxsplit=1)
-                    if len(left_parts) < 2:
-                        continue
-                    company_name, form_type = left_parts[0].strip(), left_parts[1].strip()
             
             # Normalize and filter by filing type
             form_type = form_type.upper().strip()

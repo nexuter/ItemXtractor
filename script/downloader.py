@@ -363,15 +363,23 @@ def download_from_edgar(
         stats["processed"] += 1
         cik = (record.get("cik_padded") or "").zfill(10)
         accession = record.get("accession_number", "")
+        form_type = (record.get("form_type") or "").strip()
         filing_date = record.get("date_filed", "")
-        status_prefix = f"[{i}/{total}] cik={cik} accession={accession} filed={filing_date}"
+        status_prefix = (
+            f"[{i}/{total}] cik={cik} accession={accession} "
+            f"form={form_type or 'UNKNOWN'} filed={filing_date}"
+        )
         if not accession:
             stats["failed_download"] += 1
             print(f"{status_prefix} result=failed_download reason=missing_accession")
             continue
 
         try:
-            submission_text, normalized_cik = downloader.download_submission_text_by_accession(cik, accession)
+            submission_text, normalized_cik = downloader.download_submission_text(
+                cik,
+                accession,
+                record.get("file_name", ""),
+            )
         except Exception as e:
             stats["failed_download"] += 1
             # Filing-date window already matched at least one target FY.

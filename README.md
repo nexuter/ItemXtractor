@@ -13,7 +13,7 @@ Current architecture is split by step:
 ## What This Project Does
 
 1. Pull candidate filings from EDGAR full index using filing-date windows.
-2. Download the SEC submission `.txt` for each candidate accession.
+2. Download the SEC submission `.txt` for each candidate using the `company.idx` `file_name` path directly.
 3. Read `PERIOD OF REPORT` from the submission header to identify the filing fiscal year.
 4. Keep only filings whose fiscal year is requested and whose filing date fits that fiscal year's lookahead window.
 5. During extraction, parse `<DOCUMENT>` blocks inside the saved submission `.txt`, choose the primary filing HTML, backfill ticker info only when iXBRL `dei:TradingSymbol` is present, and run TOC-driven item/structure extraction.
@@ -74,6 +74,7 @@ usage: downloader.py [-h] [--cik CIKS [CIKS ...]]
 
 - `--year` means fiscal year target(s), not filing-date year.
 - Candidate records come from EDGAR full index, filtered by filing date using the requested lookahead window.
+- For each accepted index row, downloader uses the SEC `company.idx` `file_name` value, such as `edgar/data/2006370/0001888524-26-004368.txt`, as the primary submission download path.
 - Final acceptance uses both:
   - `PERIOD OF REPORT` / `CONFORMED PERIOD OF REPORT` parsed from the submission `.txt`
   - filing-date window validation for the extracted fiscal year
@@ -145,6 +146,7 @@ python script/extractor.py --filing_dir sec_filings --filing 10-Q --task item --
 - The extractor parses SEC `<DOCUMENT>` blocks and selects the main filing HTML from the submission container.
 - Ticker mapping is extractor-owned. It only backfills `cik_ticker_map.csv` and `ticker_symbols` in filing metadata when `dei:TradingSymbol` exists in the selected filing HTML.
 - Non-iXBRL filings are skipped for ticker extraction.
+- `--image` saves item-scoped images resolved from submission attachments into a sibling `*_images` folder.
 - TOC detection is still required. If no TOC is found, extraction for that filing is skipped.
 - Extraction only keeps regulated item scope from `script/config.py`.
 - Existing output files are skipped unless `--overwrite` is set.
@@ -188,4 +190,5 @@ This compares extracted `text_content` against source HTML segments and writes:
 
 - `docs/downloader-technical.md`
 - `docs/item-extraction-technical.md`
+- `docs/image-extraction-technical.md`
 - `docs/structure-extraction-technical.md`

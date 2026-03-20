@@ -410,20 +410,24 @@ class SECDownloader:
             extension = 'txt'
         return response.text, extension, cik
 
-    def download_submission_text_by_accession(
+    def download_submission_text(
         self,
         cik_or_ticker: str,
-        accession_formatted: str
+        accession_formatted: str,
+        file_name: str = "",
     ) -> Tuple[str, str]:
         """
-        Download full SEC submission text (.txt) by accession number.
+        Download full SEC submission text (.txt).
 
-        This is useful for older filings where fiscal metadata appears in the
-        SEC header (e.g., CONFORMED PERIOD OF REPORT) rather than iXBRL tags.
+        Prefer the SEC full-index `file_name` path when available, since it
+        points directly to the submission text file. Fall back to
+        accession-derived URLs only when needed.
 
         Args:
             cik_or_ticker: CIK number or ticker symbol
             accession_formatted: Accession number in dashed format
+            file_name: SEC index file_name path (e.g.
+                edgar/data/1234567/0001234567-25-000001.txt)
 
         Returns:
             Tuple of (submission_text, cik_padded)
@@ -431,19 +435,45 @@ class SECDownloader:
         cik, _original_identifier = self._normalize_cik(cik_or_ticker)
         cik_archive = str(int(cik)) if cik.isdigit() else cik.lstrip('0')
         accession_path = accession_formatted.replace('-', '')
-        txt_url = (
-            f"{SEC_BASE_URL}/Archives/edgar/data/{cik_archive}/"
-            f"{accession_path}/{accession_formatted}.txt"
-        )
+        normalized_file_name = (file_name or "").strip().lstrip("/")
+        candidate_urls = []
+        if normalized_file_name:
+            if normalized_file_name.lower().startswith("edgar/"):
+                candidate_urls.append(f"{SEC_BASE_URL}/Archives/{normalized_file_name}")
+            elif normalized_file_name.lower().startswith("archives/"):
+                candidate_urls.append(f"{SEC_BASE_URL}/{normalized_file_name}")
+            else:
+                candidate_urls.append(f"{SEC_BASE_URL}/Archives/{normalized_file_name}")
+        candidate_urls.extend([
+            (
+                f"{SEC_BASE_URL}/Archives/edgar/data/{cik_archive}/"
+                f"{accession_path}/{accession_formatted}.txt"
+            ),
+            f"{SEC_BASE_URL}/Archives/edgar/data/{cik_archive}/{accession_formatted}.txt",
+        ])
 
         response = None
-        for attempt in range(5):
-            time.sleep(max(1.0, REQUEST_DELAY * (attempt + 1) * 5))
-            response = self.session.get(txt_url, timeout=REQUEST_TIMEOUT)
-            if response.status_code == 200:
-                return response.text, cik
-            if response.status_code == 429:
-                continue
-            break
+        for txt_url in candidate_urls:
+            for attempt in range(5):
+                time.sleep(max(1.0, REQUEST_DELAY * (attempt + 1) * 5))
+                response = self.session.get(txt_url, timeout=REQUEST_TIMEOUT)
+                if response.status_code == 200:
+                    body = response.text or ""
+                    if body.strip():
+                        return body, cik
+                    # Some SEC endpoints return a 200 with an empty body for the
+                    # nested path; treat that as a miss and try the next URL.
+                    break
+                if response.status_code == 429:
+                    continue
+                break
 
         raise Exception(f"Failed to download submission text for accession {accession_formatted}")
+
+    def download_submission_text_by_accession(
+        self,
+        cik_or_ticker: str,
+        accession_formatted: str
+    ) -> Tuple[str, str]:
+        """Backward-compatible wrapper for older call sites."""
+        return self.download_submission_text(cik_or_ticker, accession_formatted)

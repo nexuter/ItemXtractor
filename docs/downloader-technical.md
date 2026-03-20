@@ -46,10 +46,16 @@ It loads the needed EDGAR full-index years, deduplicates by accession, and filte
 
 ## Submission Download Strategy
 
-For each surviving candidate accession, downloader performs one EDGAR content request:
+For each surviving candidate row, downloader performs one EDGAR content request using the SEC full-index file path directly:
 
-- download the submission text:
-  - `.../{accession}.txt`
+- `company.idx` `file_name`, for example:
+  - `edgar/data/2006370/0001888524-26-004368.txt`
+
+Downloader converts that relative archive path into:
+
+- `https://www.sec.gov/Archives/edgar/data/2006370/0001888524-26-004368.txt`
+
+If the index path is missing or malformed, the downloader still has an accession-based fallback.
 
 The submission `.txt` is the canonical artifact now. The downloader no longer fetches filing HTML first and no longer depends on iXBRL namespace tags for fiscal-year classification.
 
@@ -126,6 +132,7 @@ The EDGAR full index already points to the submission text path. Using that file
 - reduces SEC requests compared with detail-page then HTML download flow
 - keeps the SEC header and all attached documents together
 - lets the extractor later choose the primary filing HTML from the saved submission container
+- avoids reconstructing the submission URL when the exact archive path is already present in `company.idx`
 
 ### SEC request policy
 

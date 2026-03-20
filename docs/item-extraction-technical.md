@@ -133,6 +133,9 @@ Supported cases include:
 - base64-like payloads
 - plain text fallback when the image document is not binary-encoded
 
+See also:
+- `docs/image-extraction-technical.md`
+
 ## Output Format
 
 `*_item.json` includes:
